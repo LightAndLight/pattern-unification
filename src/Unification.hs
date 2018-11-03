@@ -7,7 +7,8 @@ import Bound.Scope
   ( instantiate
   , mapBound
   )
-import Control.Lens.Fold ((^?))
+import Control.Lens.Fold ((^?), preview)
+import Control.Lens.Prism (_Just)
 import Control.Monad (unless)
 import Control.Monad.Except (MonadError, throwError)
 import Data.Sequence (Seq, ViewL(..))
@@ -15,13 +16,10 @@ import Data.Sequence (Seq, ViewL(..))
 import qualified Bound.Scope as Bound
 import qualified Data.Sequence as Seq
 
+import Equation
 import LambdaPi
 import Supply.Class
-
-data CtxEntry a
-  = Twin (Tm a) (Tm a)
-  | Only (Tm a)
-  deriving (Eq, Show)
+import Solver.Class
 
 data UnifyError a
   = Mismatch
@@ -56,16 +54,6 @@ getOnly ctx a = do
   case a' of
     Only x -> pure x
     _ -> throwError $ ExpectedOnly a
-
-data Equation a
-  = Equation
-  { eqCtx :: [(a, CtxEntry (Head a))]
-  , lhsTm :: Tm (Head a)
-  , lhsTy :: Tm (Head a)
-  , rhsTm :: Tm (Head a)
-  , rhsTy :: Tm (Head a)
-  }
-  deriving (Eq, Show)
 
 eta
   :: ( Eq a, Show a
@@ -215,3 +203,17 @@ matchSpines ctx (headTy, a1) (headTy', a2) = do
           show as <>
           "\n\nand\n\n" <>
           show as'
+
+flexRigid
+  :: ( Eq a, Show a
+     , MonadSupply a m
+     , MonadSolver e a m
+     )
+  => m ()
+flexRigid = do
+  md <- preview (_Just._MetaDecl) <$> lookLeft
+  p <- currentProblem
+  case (md, p) of
+    (Just (a, ty), Just (Problem sig eq)) -> do
+      _
+    _ -> pure ()

@@ -1,5 +1,5 @@
-{-# language GeneralizedNewtypeDeriving #-}
 {-# language FlexibleInstances, MultiParamTypeClasses, UndecidableInstances #-}
+{-# language GeneralizedNewtypeDeriving #-}
 module Supply where
 
 
@@ -41,19 +41,10 @@ instance MonadReader r m => MonadReader r (SupplyT a b m) where
       lift $ lift $ local f (runSupplyT a b m)
 
 instance MonadWriter w m => MonadWriter w (SupplyT a b m) where
-  writer = SupplyT . lift . lift . writer
-  listen m =
-    SupplyT $ do
-      a <- get; b <- ask
-      lift $ lift $ listen (runSupplyT a b m)
-  pass m =
-    SupplyT $ do
-      a <- get; b <- ask
-      lift $ lift $ pass (runSupplyT a b m)
+  writer = SupplyT . writer
+  listen = SupplyT . listen . unSupplyT
+  pass = SupplyT . pass . unSupplyT
 
 instance MonadError e m => MonadError e (SupplyT a b m) where
-  throwError = SupplyT . lift . lift . throwError
-  catchError m f =
-    SupplyT $ do
-      a <- get; b <- ask
-      lift $ lift $ catchError (runSupplyT a b m) (runSupplyT a b . f)
+  throwError = SupplyT . throwError
+  catchError m f = SupplyT $ catchError (unSupplyT m) (unSupplyT . f)
