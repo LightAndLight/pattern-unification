@@ -8,6 +8,7 @@ import Control.Monad.Except (runExcept)
 
 import LambdaPi
 import Supply (runSupplyT)
+import Unification
 
 intSeed :: Int
 intSeed = 1
@@ -39,7 +40,6 @@ main = hspec $ do
         ta = Var $ V 2
         b = Var $ V 3
         c = V 4
-        tba = apply (Var a) b
         td = Var $ V 5
         p1 = pi (a, ta) [] $ pi (c, apply (Var a) b) [] td
 
@@ -69,7 +69,6 @@ main = hspec $ do
         ta = Var $ V 2
         b = Var $ V 3
         c = V 4
-        tba = apply (Var a) b
         td = Var $ V 5
         p1 = pi (a, ta) [(c, apply (Var a) b)] td
 
