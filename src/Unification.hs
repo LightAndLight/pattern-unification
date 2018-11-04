@@ -5,12 +5,17 @@ module Unification where
 
 import Bound.Scope
   ( instantiate
+  , fromScope
   , mapBound
   )
-import Control.Lens.Fold ((^?), preview)
+import Bound.Var (unvar)
+import Control.Lens.Fold ((^?), (^..), folded, preview)
 import Control.Lens.Prism (_Just)
+import Control.Lens.Review ((#), review)
+import Control.Lens.Tuple (_1, _2)
 import Control.Monad (unless)
 import Control.Monad.Except (MonadError, throwError)
+import Data.Foldable (toList, foldl')
 import Data.Sequence (Seq, ViewL(..))
 
 import qualified Bound.Scope as Bound
@@ -21,12 +26,12 @@ import LambdaPi
 import Supply.Class
 import Solver.Class
 
-data UnifyError a
+data UnifyError f a
   = Mismatch
-  { errLhsTm :: Tm (Head a)
-  , errLhsTy :: Tm (Head a)
-  , errRhsTm :: Tm (Head a)
-  , errRhsTy :: Tm (Head a)
+  { errLhsTm :: Tm (f a)
+  , errLhsTy :: Tm (f a)
+  , errRhsTm :: Tm (f a)
+  , errRhsTy :: Tm (f a)
   }
   | NotFound a
   | ExpectedTwin a
@@ -34,10 +39,10 @@ data UnifyError a
   deriving (Eq, Show)
 
 getTwin
-  :: (MonadError (UnifyError a) m, Eq a)
-  => [(a, CtxEntry b)]
+  :: (MonadError (UnifyError f a) m, Eq a)
+  => [(a, CtxEntry (f a))]
   -> a
-  -> m (Tm b, Tm b)
+  -> m (Tm (f a), Tm (f a))
 getTwin ctx a = do
   a' <- maybe (throwError $ NotFound a) pure $ lookup a ctx
   case a' of
@@ -45,10 +50,10 @@ getTwin ctx a = do
     _ -> throwError $ ExpectedTwin a
 
 getOnly
-  :: (MonadError (UnifyError a) m, Eq a)
-  => [(a, CtxEntry b)]
+  :: (MonadError (UnifyError f a) m, Eq a)
+  => [(a, CtxEntry (f a))]
   -> a
-  -> m (Tm b)
+  -> m (Tm (f a))
 getOnly ctx a = do
   a' <- maybe (throwError $ NotFound a) pure $ lookup a ctx
   case a' of
@@ -58,15 +63,15 @@ getOnly ctx a = do
 eta
   :: ( Eq a, Show a
      , MonadSupply a m
-     , MonadError (UnifyError a) m
+     , MonadError (UnifyError Meta a) m
      )
-  => Equation a -> m [Equation a]
+  => Equation Meta a -> m [Equation Meta a]
 eta (Equation ctx a (Pi 1 b c) a' (Pi 1 b' c')) = do
   x <- fresh
   pure
     [ Equation ((x, Twin b b') : ctx)
-        (apply (Var $ VL x) a ) (apply (Var $ VL x) (Lam 1 $ teleScope c ))
-        (apply (Var $ VR x) a') (apply (Var $ VR x) (Lam 1 $ teleScope c'))
+        (apply (Var $ _VL # x) a ) (apply (Var $ _VL # x) (Lam 1 $ teleScope c ))
+        (apply (Var $ _VR # x) a') (apply (Var $ _VR # x) (Lam 1 $ teleScope c'))
     ]
 eta (Equation _ _ Pi{} _ Pi{}) = error "TODO: telescoped pi types"
 eta (Equation ctx a (Sigma b c) a' (Sigma b' c')) =
@@ -103,29 +108,33 @@ eta (Equation ctx (Sigma a b) Type (Sigma a' b') Type) =
       (Lam 1 $ mapBound (const 0) b ) (Pi 1 a  $ liftTele Type)
       (Lam 1 $ mapBound (const 0) b') (Pi 1 a' $ liftTele Type)
   ]
-eta (Equation ctx tm1@(Neutral (Var (V a)) _) _ tm2@(Neutral (Var (V a')) _) _) = do
+eta (Equation ctx tm1@(Neutral v _) _ tm2@(Neutral v' _) _)
+  | Just a <- v ^? _Var._V
+  , Just a' <- v' ^? _Var._V = do
   aTy <- getOnly ctx a
   a'Ty <- getOnly ctx a'
   unless (a == a') .
-    throwError $ Mismatch (Var $ V a) aTy (Var $ V a') a'Ty
+    throwError $ Mismatch (Var $ _V # a) aTy (Var $ _V # a') a'Ty
   (Equation ctx aTy Type a'Ty Type :) <$>
     matchSpines ctx (aTy, tm1) (a'Ty, tm2)
-eta (Equation ctx tm1@(Neutral (Var (VL a)) _) _ tm2@(Neutral (Var (VL a')) _) _) = do
-  (aTyL, _) <- getTwin ctx a
-  (_, a'TyR) <- getTwin ctx a'
-  unless (a == a') .
-    throwError $ Mismatch (Var $ VL a) aTyL (Var $ VR a') a'TyR
-  (Equation ctx aTyL Type a'TyR Type :) <$>
-    matchSpines ctx (aTyL, tm1) (a'TyR, tm2)
+eta (Equation ctx tm1@(Neutral v _) _ tm2@(Neutral v' _) _)
+  | Just a <- v ^? _Var._VL
+  , Just a' <- v' ^? _Var._VR = do
+    (aTyL, _) <- getTwin ctx a
+    (_, a'TyR) <- getTwin ctx a'
+    unless (a == a') .
+      throwError $ Mismatch (Var $ _VL # a) aTyL (Var $ _VR # a') a'TyR
+    (Equation ctx aTyL Type a'TyR Type :) <$>
+      matchSpines ctx (aTyL, tm1) (a'TyR, tm2)
 eta (Equation _ a b a' b') = throwError $ Mismatch a b a' b'
 
 matchSpines
   :: forall a m
-   . (Show a, MonadError (UnifyError a) m)
-  => [(a, CtxEntry (Head a))]
-  -> (Tm (Head a), Tm (Head a))
-  -> (Tm (Head a), Tm (Head a))
-  -> m [Equation a]
+   . (Show a, MonadError (UnifyError Meta a) m)
+  => [(a, CtxEntry (Meta a))]
+  -> (Tm (Meta a), Tm (Meta a))
+  -> (Tm (Meta a), Tm (Meta a))
+  -> m [Equation Meta a]
 matchSpines ctx (headTy, a1) (headTy', a2) = do
   (hd, as) <-
     maybe
@@ -140,10 +149,10 @@ matchSpines ctx (headTy, a1) (headTy', a2) = do
   go (headTy, Var hd, as) (headTy', Var hd', as')
   where
     go
-      :: (Show a, MonadError (UnifyError a) m)
-      => (Tm (Head a), Tm (Head a), Seq (Elim Tm (Head a)))
-      -> (Tm (Head a), Tm (Head a), Seq (Elim Tm (Head a)))
-      -> m [Equation a]
+      :: (Show a, MonadError (UnifyError Meta a) m)
+      => (Tm (Meta a), Tm (Meta a), Seq (Elim Tm (Meta a)))
+      -> (Tm (Meta a), Tm (Meta a), Seq (Elim Tm (Meta a)))
+      -> m [Equation Meta a]
     go (ty, hd, as) (ty', hd', as') =
       case (Seq.viewl as, Seq.viewl as') of
         (EmptyL, EmptyL) -> pure []
@@ -204,16 +213,77 @@ matchSpines ctx (headTy, a1) (headTy', a2) = do
           "\n\nand\n\n" <>
           show as'
 
+-- | @a \`linearOn\` b@ means:
+--
+-- @forall x. x `elem` b ==> length (filter (==x) b) == length (filter (==x) a)@
+linearOn :: (Eq a, Foldable f, Foldable g) => f a -> g a -> Bool
+linearOn a b =
+  all (\x -> count x b == count x a) b
+  where
+    count :: (Eq a, Foldable f) => a -> f a -> Int
+    count c = foldl' (\acc x -> if x == c then acc + 1 else acc) 0
+
+strongRigidIn :: Eq a => a -> Tm (Meta a) -> Bool
+strongRigidIn a = go (== M a) False
+  where
+    goTele f (Done s) = goScope f s
+    goTele f (More s t) = goScope f s || goTele f t
+
+    goScope f s = go (unvar (const False) f) False $ fromScope s
+
+    go :: (Eq a, Eq (f a)) => (f a -> Bool) -> Bool -> Tm (f a) -> Bool
+    go f inSpine tm =
+      case tm of
+        Pi _ b c -> go f False b || goTele f c
+        Lam _ b -> goScope f b
+        Sigma b c -> go f False b || goScope f c
+        Pair b c -> go f False b || go f False c
+        Neutral b cs -> go f False b || any (go f True) cs
+        Var b -> not inSpine && f b
+        Type -> False
+        Fst -> False
+        Snd -> False
+
 flexRigid
   :: ( Eq a, Show a
      , MonadSupply a m
-     , MonadSolver e a m
+     , AsSolverError e a, MonadError e m
+     , MonadSolver a m
      )
   => m ()
 flexRigid = do
-  md <- preview (_Just._MetaDecl) <$> lookLeft
+  md <- preview (_Just._MetaDecl._1) <$> lookLeft
   p <- currentProblem
   case (md, p) of
-    (Just (a, ty), Just (Problem sig eq)) -> do
-      _
+    (Just a, Just (Problem sig eq))
+      | Equation ctx tm ty tm' ty' <- eq ->
+        case tm ^? _Neutral of
+          Just (M a', xs)
+            | strongRigidIn a' tm' -> throwError $ _Occurs # (M a', tm')
+            | a == a'
+            , Just xs' <- traverse (preview $ _Tm._Var._V) xs
+            , notElem a $ (sig ^.. folded._2.folded._M) <> (tm' ^.. folded._M)
+            , xs' `linearOn` (tm' ^.. folded._V)
+            , all (`notElem` tm ^.. folded._V) (fmap fst ctx) -> do
+                solve a (lam (review _V <$> toList xs') $ tm')
+                dissolve
+          _ -> do
+            l <- lookLeft
+            case l of
+              Nothing -> pure ()
+              Just MetaProblem{} -> swapLeft
+              Just (MetaDecl b _) ->
+                if
+                  b `elem`
+                  (sig ^.. folded._2.folded._M) <>
+                  (ctx ^.. folded._2.folded._M) <>
+                  (tm ^.. folded._M) <>
+                  (ty ^.. folded._M) <>
+                  (tm' ^.. folded._M) <>
+                  (ty' ^.. folded._M)
+                then
+                  case tm ^? _Neutral._1._M of
+                    Nothing -> expandSig
+                    Just{} -> pure ()
+                else swapLeft
     _ -> pure ()

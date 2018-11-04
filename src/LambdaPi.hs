@@ -23,6 +23,7 @@ import Bound.Var (Var(..), unvar)
 import Control.Lens.Fold (preview)
 import Control.Lens.Prism (Prism', prism')
 import Control.Lens.Review (review)
+import Control.Lens.TH (makeClassyPrisms)
 import Control.Monad (ap)
 import Control.Monad.Trans.Class (lift)
 import Data.Deriving (deriveShow1, deriveEq1)
@@ -208,6 +209,14 @@ data Tm a
   | Type
   | Neutral (Tm a) (Seq (Tm a))
   deriving (Functor, Foldable, Traversable)
+
+_Var :: Prism' (Tm a) a
+_Var =
+  prism'
+    Var
+    (\case
+        Var a -> Just a
+        _ -> Nothing)
 
 deriveShow1 ''Tm; deriving instance Show a => Show (Tm a)
 deriveEq1 ''Tm; deriving instance Eq a => Eq (Tm a)
@@ -406,3 +415,5 @@ eval ctx = go
             -- call by value
             foldl elim (go a) bs'
         Var a -> ctx a
+
+makeClassyPrisms ''Head

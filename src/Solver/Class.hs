@@ -5,8 +5,7 @@
 {-# language TypeFamilies #-}
 module Solver.Class where
 
-import Control.Lens.Prism (Prism')
-import Control.Lens.TH (makeLenses, makePrisms)
+import Control.Lens.TH (makeLenses, makePrisms, makeClassyPrisms)
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
@@ -20,10 +19,12 @@ data Meta a = M a | N (Head a)
   deriving (Eq, Show)
 makePrisms ''Meta
 
+instance AsHead (Meta a) a where; _Head = _N
+
 data Problem a
   = Problem
   { _problemSig :: [(a, Tm (Meta a))]
-  , _problemEquation :: Equation (Meta a)
+  , _problemEquation :: Equation Meta a
   }
   deriving (Eq, Show)
 makeLenses ''Problem
@@ -34,12 +35,13 @@ data MetaEntry a
   deriving (Eq, Show)
 makePrisms ''MetaEntry
 
-class AsSolverError s a | s -> a where
-  _MetaNotFound :: Prism' s (Meta a)
-  _Occurs :: Prism' s (Meta a, Tm (Meta a))
-  _DisagreeingSolutions :: Prism' s (a, Tm (Meta a), Tm (Meta a))
+data SolverError a
+  = MetaNotFound (Meta a)
+  | Occurs (Meta a) (Tm (Meta a))
+  | DisagreeingSolutions a (Tm (Meta a)) (Tm (Meta a))
+  deriving (Eq, Show)
 
-class (AsSolverError e a, Monad m) => MonadSolver a e m | m -> a e where
+class Monad m => MonadSolver a m | m -> a where
   -- | View the current problem we're working on
   currentProblem :: m (Maybe (Problem a))
 
@@ -58,25 +60,27 @@ class (AsSolverError e a, Monad m) => MonadSolver a e m | m -> a e where
   -- | Swap the current problem with the entry on its left
   swapLeft :: m ()
 
-  default currentProblem :: (MonadSolver a e u, MonadTrans t, t u ~ m) => m (Maybe (Problem a))
+  default currentProblem :: (MonadSolver a u, MonadTrans t, t u ~ m) => m (Maybe (Problem a))
   currentProblem = lift currentProblem
 
-  default solve :: (MonadSolver a e u, MonadTrans t, t u ~ m) => a -> Tm (Meta a) -> m ()
+  default solve :: (MonadSolver a u, MonadTrans t, t u ~ m) => a -> Tm (Meta a) -> m ()
   solve a b = lift $ solve a b
 
-  default dissolve :: (MonadSolver a e u, MonadTrans t, t u ~ m) => m ()
+  default dissolve :: (MonadSolver a u, MonadTrans t, t u ~ m) => m ()
   dissolve = lift dissolve
 
-  default expandSig :: (MonadSolver a e u, MonadTrans t, t u ~ m) => m ()
+  default expandSig :: (MonadSolver a u, MonadTrans t, t u ~ m) => m ()
   expandSig = lift expandSig
 
-  default lookLeft :: (MonadSolver a e u, MonadTrans t, t u ~ m) => m (Maybe (MetaEntry a))
+  default lookLeft :: (MonadSolver a u, MonadTrans t, t u ~ m) => m (Maybe (MetaEntry a))
   lookLeft = lift lookLeft
 
-  default swapLeft :: (MonadSolver a e u, MonadTrans t, t u ~ m) => m ()
+  default swapLeft :: (MonadSolver a u, MonadTrans t, t u ~ m) => m ()
   swapLeft = lift swapLeft
 
-instance MonadSolver a e m => MonadSolver a e (ExceptT e' m)
-instance MonadSolver a e m => MonadSolver a e (ReaderT r m)
-instance MonadSolver a e m => MonadSolver a e (StateT s m)
-instance (MonadSolver a e m, Monoid w) => MonadSolver a e (WriterT w m)
+instance MonadSolver a m => MonadSolver a (ExceptT e m)
+instance MonadSolver a m => MonadSolver a (ReaderT r m)
+instance MonadSolver a m => MonadSolver a (StateT s m)
+instance (MonadSolver a m, Monoid w) => MonadSolver a (WriterT w m)
+
+makeClassyPrisms ''SolverError

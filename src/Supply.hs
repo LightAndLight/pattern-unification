@@ -9,6 +9,7 @@ import Control.Monad.State (MonadState(..), StateT, evalStateT)
 import Control.Monad.Writer (MonadWriter(..))
 import Control.Monad.Trans.Class (MonadTrans(..))
 
+import Solver.Class
 import Supply.Class
 
 newtype SupplyT s v m a
@@ -48,3 +49,5 @@ instance MonadWriter w m => MonadWriter w (SupplyT a b m) where
 instance MonadError e m => MonadError e (SupplyT a b m) where
   throwError = SupplyT . throwError
   catchError m f = SupplyT $ catchError (unSupplyT m) (unSupplyT . f)
+
+instance MonadSolver a m => MonadSolver a (SupplyT x y m)

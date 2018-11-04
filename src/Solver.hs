@@ -21,6 +21,7 @@ import Data.Maybe (fromMaybe)
 
 import LambdaPi
 import Solver.Class
+import Supply.Class
 
 data MetaContext a
   = MetaContext
@@ -39,7 +40,7 @@ newtype SolverT v e m a
 runSolverT :: Monad m => MetaContext v -> SolverT v e m a -> m (Either e a)
 runSolverT c = runExceptT . flip evalStateT c . unSolverT
 
-instance (Eq a, AsSolverError e a, Monad m) => MonadSolver a e (SolverT a e m) where
+instance (Eq a, AsSolverError e a, Monad m) => MonadSolver a (SolverT a e m) where
   currentProblem =
     SolverT $ use mcCurrentProblem
 
@@ -102,9 +103,4 @@ instance MonadWriter w m => MonadWriter w (SolverT a b m) where
   listen = SolverT . listen . unSolverT
   pass = SolverT . pass . unSolverT
 
-instance MonadError e m => MonadError e (SolverT a b m) where
-  throwError = SolverT . lift . lift . throwError
-  catchError m f =
-    SolverT $ do
-      a <- get
-      lift $ ExceptT $ catchError (runSolverT a m) (runSolverT a . f)
+instance MonadSupply a m => MonadSupply a (SolverT x y m)
