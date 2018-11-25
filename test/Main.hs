@@ -7,6 +7,8 @@ import Test.Hspec
 
 import Control.Lens.Review ((#))
 import Control.Monad.Except (runExcept)
+import Control.Monad.State (runStateT)
+import Control.Monad.Trans (lift)
 import Data.Functor.Identity (Identity(..))
 
 import Equation
@@ -30,11 +32,22 @@ runEta = runExcept . runSupplyT intSeed intGen . eta
 runFlexRigid
   :: MetaContext v
   -> SupplyT Int Int (SolverT v (SolverError v) Identity) a
-  -> Either (SolverError v) a
-runFlexRigid ctx = runIdentity . runSolverT ctx . runSupplyT intSeed intGen
+  -> Either (SolverError v) (a, MetaContext v)
+runFlexRigid ctx =
+  runExcept .
+  flip runStateT ctx .
+  unSolverT .
+  runSupplyT intSeed intGen
 
 main :: IO ()
 main = hspec $ do
+  describe "type checker" $ do
+    it "(\\x. y. y) : pi (t : Type). pi (a : t). a" $ do
+      check
+        (const Nothing)
+        (Lam $ lift $ lam "x" $ Var "x")
+        (pi ("t", Type) $ pi ("a", Var "t") $ Var "a") `shouldBe`
+        True
   describe "flex-rigid" $ do
     it "flex-rigid test 1" $ do
       let
@@ -50,17 +63,30 @@ main = hspec $ do
         p =
           Problem [] $
           Equation
+            -- x : t
             [(x, Only t)]
+            -- a x : t
             (Neutral (Var $ _M # a) [Var (_V # x)]) t
-            (Var $ _V # x)                   t
+            -- x : t
+            (Var $ _V # x)                          t
+
+
+        expectedMC =
+          MetaContext
+            [MetaDecl a $ pi (_V # 3, t) t]
+            Nothing
+            []
+            [(a, lam (M 0) . Var $ _V # 0 )]
+
       runFlexRigid
         (MetaContext
-           [MetaDecl a $ pi (_V # 3, t) [] t]
+           -- a : (c : t) -> t
+           [MetaDecl a $ pi (_V # 3, t) t]
            (Just $ p)
            []
            [])
         flexRigid
-        `shouldBe` Right ()
+        `shouldBe` Right ((), expectedMC)
   describe "eta expansion" $ do
     it "eta test 1" $ do
       let
@@ -81,7 +107,7 @@ main = hspec $ do
         b = Var $ _V # 3
         c = _V # 4
         td = Var $ _V # 5
-        p1 = pi (a, ta) [] $ pi (c, apply (Var a) b) [] td
+        p1 = pi (a, ta) $ pi (c, apply (Var a) b) td
 
         ctx = [(0, Only p1)]
 
@@ -110,7 +136,7 @@ main = hspec $ do
         b = Var $ _V # 3
         c = _V # 4
         td = Var $ _V # 5
-        p1 = pi (a, ta) [(c, apply (Var a) b)] td
+        p1 = pi (a, ta) $ pi (c, apply (Var a) b) td
 
         ctx = [(0, Only p1)]
 

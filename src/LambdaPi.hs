@@ -9,15 +9,15 @@
 {-# language RankNTypes, ScopedTypeVariables #-}
 module LambdaPi where
 
+import Debug.Trace
+
 import Prelude hiding (pi)
 
 import Bound.Class (Bound(..))
 import Bound.Scope
-  ( Scope(..), unscope
-  , abstract
-  , instantiate
+  ( Scope(..)
+  , abstract1, instantiate1
   , toScope, fromScope
-  , bitransverseScope
   )
 import Bound.Var (Var(..), unvar)
 import Control.Lens.Fold (preview)
@@ -27,14 +27,12 @@ import Control.Lens.TH (makeClassyPrisms)
 import Control.Monad (ap)
 import Control.Monad.Trans.Class (lift)
 import Data.Deriving (deriveShow1, deriveEq1)
-import Data.Functor.Classes (Show1, Eq1(..))
-import Data.Functor.Identity (Identity(..))
-import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
-import Data.Sequence ((|>), Seq)
+import Data.Sequence ((|>), Seq, ViewL(..), viewl)
 
 import qualified Bound.Scope as Bound
 
+{-
 data Tele f a
   = More (Scope Int f a) (Tele f a)
   | Done (Scope Int f a)
@@ -127,6 +125,7 @@ instantiateTele tm tele =
 instance Bound Tele where
   Done a >>>= f = Done (a >>>= f)
   More a b >>>= f = More (a >>>= f) (b >>>= f)
+-}
 
 data Elim f a
   = Elim_Tm (f a)
@@ -181,17 +180,11 @@ class AsNeutral s a | s -> a where
 elim :: Show a => Tm a -> Elim Tm a -> Tm a
 elim (Pair a _) Elim_Fst = a
 elim (Pair _ b) Elim_Snd = b
-elim (Lam 0 s) tm = elim (instantiate undefined s) tm
-elim (Lam n s) (Elim_Tm a) | n > 0 =
-  Lam (n-1) .
-  Scope .
-  fmap (unvar (\m -> if m == 0 then F a else B (m-1)) F) $
-  unscope s
+elim (Lam s) (Elim_Tm tm) = instantiate1 tm s
 elim a b = error $ "can't eliminate " <> show a <> " with " <> show b
 
 apply :: Tm a -> Tm a -> Tm a
-apply a (Lam 1 b) = instantiate (const a) b
-apply a (Lam n b) = Lam (n-1) $ instantiate1 a b
+apply a (Lam b) = instantiate1 a b
 apply a (Neutral b c) = Neutral b $ c |> a
 apply a b = Neutral b [a]
 
@@ -200,8 +193,8 @@ data Head a = V a | VL a | VR a
 
 data Tm a
   = Var a
-  | Pi !Int (Tm a) (Tele Tm a)
-  | Lam !Int (Scope Int Tm a)
+  | Pi (Tm a) (Scope () Tm a)
+  | Lam (Scope () Tm a)
   | Sigma (Tm a) (Scope () Tm a)
   | Pair (Tm a) (Tm a)
   | Fst
@@ -225,8 +218,8 @@ instance Applicative Tm where; pure = return; (<*>) = ap
 instance Monad Tm where
   return = Var
 
-  Pi n a b >>= f = Pi n (a >>= f) (b >>>= f)
-  Lam n a >>= f = Lam n (a >>>= f)
+  Pi a b >>= f = Pi (a >>= f) (b >>>= f)
+  Lam a >>= f = Lam (a >>>= f)
   Sigma a b >>= f = Sigma (a >>= f) (b >>>= f)
   Pair a b >>= f = Pair (a >>= f) (b >>= f)
   Type >>= _ = Type
@@ -235,12 +228,16 @@ instance Monad Tm where
   Neutral a bs >>= f = Neutral (a >>= f) ((>>= f) <$> bs)
   Var a >>= f = f a
 
-lam :: Eq a => [a] -> Tm a -> Tm a
-lam args = Lam (length args) . abstract (`elemIndex` args)
+lam :: Eq a => a -> Tm a -> Tm a
+lam a = Lam . abstract1 a
 
 sigma :: Eq a => (a, Tm a) -> Tm a -> Tm a
 sigma (a, tm) tm' = Sigma tm (Bound.abstract1 a tm')
 
+pi :: Eq a => (a, Tm a) -> Tm a -> Tm a
+pi (a, tm) tm' = Pi tm (Bound.abstract1 a tm')
+
+{-
 pi :: Eq a => (a, Tm a) -> [(a, Tm a)]-> Tm a -> Tm a
 pi (a, tm) args ret =
   Pi (length args + 1) tm .
@@ -249,6 +246,7 @@ pi (a, tm) args ret =
     (\tele (a', tm') -> More (lift tm') $ abstractTele a' tele)
     (Done $ lift ret)
     args
+-}
 
 instance AsElim (Tm a) Tm a where
   _Elim =
@@ -270,18 +268,7 @@ instance AsNeutral (Tm a) a where
           Neutral (Var a) bs -> (,) a <$> traverse (preview _Elim) bs
           _ -> Nothing)
 
-evalScope
-  :: ( Show a, Eq a
-     , Show b, Eq b
-     )
-  => (a -> Tm a)
-  -> Scope b Tm a
-  -> Scope b Tm a
-evalScope ctx =
-  toScope .
-  eval (unvar (pure . B) (fmap F . ctx)) .
-  fromScope
-
+{-
 evalTele :: (Show a, Eq a) => (a -> Tm a) -> Tele Tm a -> Tele Tm a
 evalTele ctx (Done s) = Done $ evalScope ctx s
 evalTele ctx (More s rest) = More (evalScope ctx s) (evalTele ctx rest)
@@ -334,73 +321,27 @@ plateTm f = go
         Pair a b -> Pair <$> f a <*> f b
         Neutral a bs -> Neutral <$> f a <*> traverse f bs
         _ -> f tm
-
-{-
-biplateTm
-  :: forall m c a
-   . (Monad m, c a, forall w z. (c w, c z) => c (Var w z))
-  => Proxy c
-  -> (forall c x. c x => Proxy c -> Tm x -> m (Tm x))
-  -> (a -> m a)
-  -> Tm a -> m (Tm a)
-biplateTm pxy f g = go
-  where
-    goTele :: Tele Tm a -> m (Tele Tm a)
-    goTele (Done a) = Done <$> goScope a
-    goTele (More a b) = More <$> goScope a <*> goTele b
-
-    goScope :: forall b. c (Var b a) => Scope b Tm a -> m (Scope b Tm a)
-    goScope = fmap toScope . f pxy . fromScope
-
-    go tm =
-      case tm of
-        Pi n a -> Pi n <$> goTele a
-        Lam n a -> Lam n <$> goScope a
-        Sigma a b -> Sigma <$> f pxy a <*> goScope b
-        Pair a b -> Pair <$> f pxy a <*> f pxy b
-        Neutral a bs -> Neutral <$> f pxy a <*> traverse (f pxy) bs
-        _ -> traverse g =<< f pxy tm
 -}
 
-type Transversal s t a b =
-  forall m
-    . Applicative m
-   => (forall x. a x -> m (b x))
-   -> forall x. s x -> m (t x)
+evalScope
+  :: ( Show a, Eq a
+     , Show b, Eq b
+     )
+  => (a -> Maybe (Tm a))
+  -> Scope b Tm a
+  -> Scope b Tm a
+evalScope ctx =
+  toScope .
+  eval (unvar (Just . pure . B) (fmap (fmap F) . ctx)) .
+  fromScope
 
--- | Bottom-up transformation
-transform
-  :: Transversal a a a a
-  -> (forall x. a x -> a x)
-  -> a y -> a y
-transform t f = go
-  where
-    go = f . runIdentity . t (Identity . f)
-
-{-
-eval :: (Show a, Eq a) => (forall x. Show x => x -> Tm x) -> Tm a -> Tm a
-eval ctx =
-  transform plateTm $
-  \case
-    Var a -> ctx a
-    Neutral a bs ->
-      let
-        bs' =
-          fromMaybe (error "non-eliminator in spine") $
-          traverse (preview _Elim) bs
-      in
-        -- call by value
-        foldl elim a bs'
-    a -> a
--}
-
-eval :: (Show a, Eq a) => (a -> Tm a) -> Tm a -> Tm a
+eval :: (Show a, Eq a) => (a -> Maybe (Tm a)) -> Tm a -> Tm a
 eval ctx = go
   where
     go tm =
       case tm of
-        Pi n a b -> Pi n (go a) (evalTele ctx b)
-        Lam n a -> Lam n $ evalScope ctx a
+        Pi a b -> Pi (go a) (evalScope ctx b)
+        Lam a -> Lam $ evalScope ctx a
         Sigma a b -> Sigma (go a) (evalScope ctx b)
         Pair a b -> Pair (go a) (go b)
         Type -> Type
@@ -414,6 +355,84 @@ eval ctx = go
           in
             -- call by value
             foldl elim (go a) bs'
-        Var a -> ctx a
+        Var a -> fromMaybe tm $ ctx a
+
+check
+  :: (Eq a, Show a)
+  => (a -> Maybe (Tm a)) -- ^ Context
+  -> Tm a -- ^ Term
+  -> Tm a -- ^ Type
+  -> Bool
+check _ Type ty =
+  case ty of
+    -- weeeewoooooweeeewooooo
+    Type -> True
+    _ -> False
+check ctx (Pi s t) ty =
+  case ty of
+    Type ->
+      check ctx s Type &&
+      check
+        (unvar (const Nothing) (fmap (fmap F) . ctx))
+        (fromScope t)
+        (Pi (F <$> s) (lift Type))
+    _ -> False
+check ctx (Lam b) ty =
+  case ty of
+    Pi x y ->
+      check
+        (unvar (\() -> Just $ F <$> x) (fmap (fmap F) . ctx))
+        (fromScope b)
+        (fromScope y)
+    _ -> False
+check ctx (Sigma s t) ty =
+  case ty of
+    Type ->
+      check ctx s Type &&
+      check
+        (unvar (const Nothing) (fmap (fmap F) . ctx))
+        (fromScope t)
+        (Pi (F <$> s) (lift Type))
+    _ -> False
+check ctx (Pair a b) ty =
+  case ty of
+    Sigma s t ->
+      check ctx a s &&
+      check ctx b (instantiate1 a t)
+    _ -> False
+check ctx e ty =
+  maybe False (== traceShowId (eval ctx ty)) $
+  traceShowId $ infer ctx e
+
+infer
+  :: (Eq a, Show a)
+  => (a -> Maybe (Tm a)) -- ^ Context
+  -> Tm a -- ^ Term
+  -> Maybe (Tm a)
+infer ctx (Var a) = ctx a
+infer ctx (Neutral f xs) = do
+  case f of
+    Fst | [x] <- xs -> do
+      xTy <- infer ctx x
+      case xTy of
+        Sigma s _ -> Just s
+        _ -> Nothing
+    Snd | [x] <- xs -> do
+      xTy <- infer ctx x
+      case xTy of
+        Sigma _ t -> Just $ instantiate1 (Neutral Snd [x]) t
+        _ -> Nothing
+    _ -> do
+      fty <- infer ctx f
+      go fty xs
+  where
+    go fty as =
+      case viewl as of
+        EmptyL -> Just fty
+        b :< bs -> do
+          case fty of
+            Pi s t | check ctx b s -> go (instantiate1 b t) bs
+            _ -> Nothing
+infer _ _ = Nothing
 
 makeClassyPrisms ''Head

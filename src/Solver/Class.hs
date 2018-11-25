@@ -57,6 +57,9 @@ class Monad m => MonadSolver a m | m -> a where
   -- | View the entry to the left of the current problem
   lookLeft :: m (Maybe (MetaEntry a))
 
+  -- | Get the binding context to the left
+  getContext :: m [(a, Tm (Meta a))]
+
   -- | Swap the current problem with the entry on its left
   swapLeft :: m ()
 
@@ -74,6 +77,9 @@ class Monad m => MonadSolver a m | m -> a where
 
   default lookLeft :: (MonadSolver a u, MonadTrans t, t u ~ m) => m (Maybe (MetaEntry a))
   lookLeft = lift lookLeft
+
+  default getContext :: (MonadSolver a u, MonadTrans t, t u ~ m) => m [(a, Tm (Meta a))]
+  getContext = lift getContext
 
   default swapLeft :: (MonadSolver a u, MonadTrans t, t u ~ m) => m ()
   swapLeft = lift swapLeft

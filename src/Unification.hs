@@ -3,18 +3,14 @@
 {-# language ScopedTypeVariables #-}
 module Unification where
 
-import Bound.Scope
-  ( instantiate
-  , fromScope
-  , mapBound
-  )
+import Bound.Scope (instantiate1, fromScope)
 import Bound.Var (unvar)
 import Control.Lens.Fold ((^?), (^..), folded, preview)
-import Control.Lens.Prism (_Just)
 import Control.Lens.Review ((#), review)
 import Control.Lens.Tuple (_1, _2)
-import Control.Monad (unless)
+import Control.Monad ((<=<), unless)
 import Control.Monad.Except (MonadError, throwError)
+import Control.Monad.Trans (lift)
 import Data.Foldable (toList, foldl')
 import Data.Sequence (Seq, ViewL(..))
 
@@ -66,14 +62,13 @@ eta
      , MonadError (UnifyError Meta a) m
      )
   => Equation Meta a -> m [Equation Meta a]
-eta (Equation ctx a (Pi 1 b c) a' (Pi 1 b' c')) = do
+eta (Equation ctx a (Pi b c) a' (Pi b' c')) = do
   x <- fresh
   pure
     [ Equation ((x, Twin b b') : ctx)
-        (apply (Var $ _VL # x) a ) (apply (Var $ _VL # x) (Lam 1 $ teleScope c ))
-        (apply (Var $ _VR # x) a') (apply (Var $ _VR # x) (Lam 1 $ teleScope c'))
+        (apply (Var $ _VL # x) a ) (apply (Var $ _VL # x) (Lam c ))
+        (apply (Var $ _VR # x) a') (apply (Var $ _VR # x) (Lam c'))
     ]
-eta (Equation _ _ Pi{} _ Pi{}) = error "TODO: telescoped pi types"
 eta (Equation ctx a (Sigma b c) a' (Sigma b' c')) =
   pure
   [ Equation ctx
@@ -88,25 +83,23 @@ eta (Equation ctx a (Sigma b c) a' (Sigma b' c')) =
     a'Fst = Neutral a' [Fst]
 -- TODO can this system solve universe constraints?
 eta (Equation _ Type Type Type Type) = pure []
-eta (Equation ctx (Pi 1 a b) Type (Pi 1 a' b') Type) =
+eta (Equation ctx (Pi a b) Type (Pi a' b') Type) =
   pure
   [ Equation ctx
       a  Type
       a' Type
   , Equation ctx
-      (Lam 1 $ teleScope b ) (Pi 1 a  $ liftTele Type)
-      (Lam 1 $ teleScope b') (Pi 1 a' $ liftTele Type)
+      (Lam b ) (Pi a  $ lift Type)
+      (Lam b') (Pi a' $ lift Type)
   ]
-eta (Equation _ Pi{} Type Pi{} Type) =
-  error "TODO: telescoped pi types"
 eta (Equation ctx (Sigma a b) Type (Sigma a' b') Type) =
   pure
   [ Equation ctx
       a  Type
       a' Type
   , Equation ctx
-      (Lam 1 $ mapBound (const 0) b ) (Pi 1 a  $ liftTele Type)
-      (Lam 1 $ mapBound (const 0) b') (Pi 1 a' $ liftTele Type)
+      (Lam b)  (Pi a  $ lift Type)
+      (Lam b') (Pi a' $ lift Type)
   ]
 eta (Equation ctx tm1@(Neutral v _) _ tm2@(Neutral v' _) _)
   | Just a <- v ^? _Var._V
@@ -158,20 +151,19 @@ matchSpines ctx (headTy, a1) (headTy', a2) = do
         (EmptyL, EmptyL) -> pure []
         (x :< xs, y :< ys) ->
           case (ty, ty') of
-            (Pi 1 a b, Pi 1 a' b') ->
+            (Pi a b, Pi a' b') ->
               case (x, y) of
                 (Elim_Tm c, Elim_Tm c') ->
                   (Equation ctx c a c' a' :) <$>
                   go
-                    (instantiate (const c)  $ teleScope b , apply c  hd , xs)
-                    (instantiate (const c') $ teleScope b', apply c' hd', ys)
+                    (instantiate1 c  $ b , apply c  hd , xs)
+                    (instantiate1 c' $ b', apply c' hd', ys)
                 _ ->
                   error $
                   "spines don't match:\n\n" <>
                   show x <>
                   "\n\nand\n\n" <>
                   show y
-            (Pi{}, Pi{}) -> error "TODO: telescoped pi types"
             (Sigma a b, Sigma a' b') ->
               case (x, y) of
                 (Elim_Fst, Elim_Fst) ->
@@ -226,16 +218,13 @@ linearOn a b =
 strongRigidIn :: Eq a => a -> Tm (Meta a) -> Bool
 strongRigidIn a = go (== M a) False
   where
-    goTele f (Done s) = goScope f s
-    goTele f (More s t) = goScope f s || goTele f t
-
     goScope f s = go (unvar (const False) f) False $ fromScope s
 
     go :: (Eq a, Eq (f a)) => (f a -> Bool) -> Bool -> Tm (f a) -> Bool
     go f inSpine tm =
       case tm of
-        Pi _ b c -> go f False b || goTele f c
-        Lam _ b -> goScope f b
+        Pi b c -> go f False b || goScope f c
+        Lam b -> goScope f b
         Sigma b c -> go f False b || goScope f c
         Pair b c -> go f False b || go f False c
         Neutral b cs -> go f False b || any (go f True) cs
@@ -252,29 +241,30 @@ flexRigid
      )
   => m ()
 flexRigid = do
-  md <- preview (_Just._MetaDecl._1) <$> lookLeft
-  p <- currentProblem
-  case (md, p) of
-    (Just a, Just (Problem sig eq))
-      | Equation ctx tm ty tm' ty' <- eq ->
-        case tm ^? _Neutral of
-          Just (M a', xs)
-            | strongRigidIn a' tm' -> throwError $ _Occurs # (M a', tm')
-            | a == a'
-            , Just xs' <- traverse (preview $ _Tm._Var._V) xs
-            , notElem a $ (sig ^.. folded._2.folded._M) <> (tm' ^.. folded._M)
-            , xs' `linearOn` (tm' ^.. folded._V)
-            , all (`notElem` tm ^.. folded._V) (fmap fst ctx) -> do
-                solve a (lam (review _V <$> toList xs') $ tm')
-                dissolve
-          _ -> do
-            l <- lookLeft
-            case l of
-              Nothing -> pure ()
-              Just MetaProblem{} -> swapLeft
-              Just (MetaDecl b _) ->
+  l <- lookLeft
+  fullCtx <- getContext
+  case l of
+    Nothing -> error "flexRigid: nothing to the left"
+    Just MetaProblem{} -> swapLeft
+    Just (MetaDecl a aTy) -> do
+      p <- currentProblem
+      case p of
+        Just (Problem sig eq)
+          | Equation ctx tm ty tm' ty' <- eq ->
+            case tm ^? _Neutral of
+              Just (M a', xs)
+                | strongRigidIn a' tm' -> throwError $ _Occurs # (M a', tm')
+                | a == a'
+                , Just xs' <- traverse (preview $ _Tm._Var._V) xs
+                , notElem a $
+                    (sig ^.. folded._2.folded._M) <>
+                    (tm' ^.. folded._M)
+                , xs' `linearOn` (tm' ^.. folded._V)
+                , solution <- foldr lam tm' (review _V <$> toList xs')
+                , check (flip lookup (fullCtx <> sig) <=< preview _M) solution aTy -> solve a solution *> dissolve
+              _ ->
                 if
-                  b `elem`
+                  a `elem`
                   (sig ^.. folded._2.folded._M) <>
                   (ctx ^.. folded._2.folded._M) <>
                   (tm ^.. folded._M) <>
@@ -283,7 +273,7 @@ flexRigid = do
                   (ty' ^.. folded._M)
                 then
                   case tm ^? _Neutral._1._M of
-                    Nothing -> expandSig
-                    Just{} -> pure ()
+                    Just a' | a == a' -> pure ()
+                    _ -> expandSig
                 else swapLeft
-    _ -> pure ()
+        _ -> pure ()

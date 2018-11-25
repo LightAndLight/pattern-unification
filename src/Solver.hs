@@ -5,7 +5,7 @@
 module Solver where
 
 import Control.Lens.Cons (_head)
-import Control.Lens.Fold (preuse)
+import Control.Lens.Fold (folded, preuse, toListOf)
 import Control.Lens.Getter (use)
 import Control.Lens.Prism (_Just)
 import Control.Lens.Review ((#))
@@ -14,7 +14,7 @@ import Control.Lens.TH (makeLenses)
 import Control.Monad (unless)
 import Control.Monad.Except (MonadError(..), ExceptT(..), runExceptT)
 import Control.Monad.Reader (MonadReader(..))
-import Control.Monad.State (MonadState(..), StateT, evalStateT)
+import Control.Monad.State (MonadState(..), StateT, evalStateT, gets)
 import Control.Monad.Trans.Class (MonadTrans(..))
 import Control.Monad.Writer (MonadWriter(..))
 import Data.Maybe (fromMaybe)
@@ -78,6 +78,8 @@ instance (Eq a, AsSolverError e a, Monad m) => MonadSolver a (SolverT a e m) whe
         _ -> pure ()
 
   lookLeft = SolverT $ preuse (mcEntriesLeft._head)
+
+  getContext = SolverT $ gets (toListOf $ mcEntriesLeft.folded._MetaDecl)
 
   swapLeft =
     SolverT $ do
