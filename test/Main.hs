@@ -68,7 +68,7 @@ main = hspec $ do
             -- a x : t
             (Neutral (Var $ _M # a) [Var (_V # x)]) t
             -- x : t
-            (Var $ _V # x)                          t
+            (Var $ _V # x) t
 
 
         expectedMC =
@@ -76,7 +76,7 @@ main = hspec $ do
             [MetaDecl a $ pi (_V # 3, t) t]
             Nothing
             []
-            [(a, lam (M 0) . Var $ _V # 0 )]
+            [(a, lam (_V # 0) (Var $ _V # 0))]
 
       runFlexRigid
         (MetaContext

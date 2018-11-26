@@ -9,8 +9,6 @@
 {-# language RankNTypes, ScopedTypeVariables #-}
 module LambdaPi where
 
-import Debug.Trace
-
 import Prelude hiding (pi)
 
 import Bound.Class (Bound(..))
@@ -400,9 +398,7 @@ check ctx (Pair a b) ty =
       check ctx a s &&
       check ctx b (instantiate1 a t)
     _ -> False
-check ctx e ty =
-  maybe False (== traceShowId (eval ctx ty)) $
-  traceShowId $ infer ctx e
+check ctx e ty = maybe False (== eval ctx ty) $ infer ctx e
 
 infer
   :: (Eq a, Show a)
