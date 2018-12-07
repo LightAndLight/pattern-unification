@@ -235,17 +235,6 @@ sigma (a, tm) tm' = Sigma tm (Bound.abstract1 a tm')
 pi :: Eq a => (a, Tm a) -> Tm a -> Tm a
 pi (a, tm) tm' = Pi tm (Bound.abstract1 a tm')
 
-{-
-pi :: Eq a => (a, Tm a) -> [(a, Tm a)]-> Tm a -> Tm a
-pi (a, tm) args ret =
-  Pi (length args + 1) tm .
-  abstractTele a $
-  foldl
-    (\tele (a', tm') -> More (lift tm') $ abstractTele a' tele)
-    (Done $ lift ret)
-    args
--}
-
 instance AsElim (Tm a) Tm a where
   _Elim =
     prism'

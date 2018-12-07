@@ -1,9 +1,10 @@
 {-# language FlexibleContexts #-}
 {-# language OverloadedLists #-}
 {-# language ScopedTypeVariables #-}
+{-# language ViewPatterns #-}
 module Unification where
 
-import Bound.Scope (instantiate1, fromScope)
+import Bound.Scope (Scope, instantiate1, fromScope)
 import Bound.Var (unvar)
 import Control.Lens.Fold ((^?), (^..), folded, preview)
 import Control.Lens.Review ((#), review)
@@ -277,3 +278,45 @@ flexRigid = do
                     _ -> expandSig
                 else swapLeft
         _ -> pure ()
+
+intersect
+  :: Eq a
+  => Tm a
+  -> Scope () Tm a
+  -> Seq a
+  -> Seq a
+  -> Maybe (Tm a, a -> Tm a)
+intersect psi t a b =
+  -- TODO
+  case (Seq.viewl a, Seq.viewl b) of
+    (EmptyL, EmptyL) -> _
+    (x :< xs, y :< ys) -> _
+    _ -> error "intersect: impossible, input sequences must be the same length"
+
+flexFlex
+  :: ( Eq a, Show a
+     , MonadSupply a m
+     , AsSolverError e a, MonadError e m
+     , MonadSolver a m
+     )
+  => m ()
+flexFlex = do
+  maybeEntry <- lookLeft
+  maybeProb <- currentProblem
+  case (maybeEntry, maybeProb) of
+    (Just (MetaDecl v tm), Just prob) -> do
+      let Problem sig (Equation gamma x xTy y yTy) = prob
+      case (,) <$> (x ^? _Neutral) <*> (y ^? _Neutral) of
+        Just ((alpha, traverse (^? _Tm._Var) -> Just xs), (beta, traverse (^? _Tm._Var) -> Just ys))
+          | alpha == beta
+          , alpha == (_V # v)
+          , length xs == length ys
+          , Pi psi t <- tm -> do
+              case intersect psi t xs ys of
+                Nothing -> pure ()
+                Just (newTy, mkNewTm) -> do
+                  new <- fresh
+                  _
+          | otherwise -> _
+        _ -> pure ()
+    _ -> pure ()

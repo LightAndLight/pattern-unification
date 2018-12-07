@@ -76,12 +76,57 @@ main = hspec $ do
             [MetaDecl a $ pi (_V # 3, t) t]
             Nothing
             []
+            -- a = \x. x
             [(a, lam (_V # 0) (Var $ _V # 0))]
 
       runFlexRigid
         (MetaContext
            -- a : (c : t) -> t
            [MetaDecl a $ pi (_V # 3, t) t]
+           (Just $ p)
+           []
+           [])
+        flexRigid
+        `shouldBe` Right ((), expectedMC)
+    it "flex-rigid test 2" $ do
+      let
+        a :: Int
+        a = 0
+
+        t :: Tm (Meta Int)
+        t = Var $ _V # 1
+
+        t' :: Tm (Meta Int)
+        t' = Var $ _V # 2
+
+        x = 3
+        y = 4
+
+        p :: Problem Int
+        p =
+          Problem [] $
+          Equation
+            -- x : t
+            [(x, Only t)]
+            -- a x y : t
+            (Neutral (Var $ _M # a) [Var (_V # x), Var (_V # y)]) t
+            -- x : t
+            (Var $ _V # x) t
+
+
+        expectedMC =
+          MetaContext
+            -- a : (c : t) -> (d : t') -> t
+            [MetaDecl a $ pi (_V # 5, t) $ pi (_V # 6, t') $ t]
+            Nothing
+            []
+            -- a = \x y. x
+            [(a, lam (_V # 0) $ lam (_V # 1) (Var $ _V # 0))]
+
+      runFlexRigid
+        (MetaContext
+           -- a : (c : t) -> (d : t') -> t
+           [MetaDecl a $ pi (_V # 5, t) $ pi (_V # 6, t') t]
            (Just $ p)
            []
            [])
