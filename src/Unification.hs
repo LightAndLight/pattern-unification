@@ -4,8 +4,8 @@
 {-# language ViewPatterns #-}
 module Unification where
 
-import Bound.Scope (Scope, instantiate1, fromScope)
-import Bound.Var (unvar)
+import Bound.Scope (Scope, instantiate1, fromScope, toScope)
+import Bound.Var (Var(..), unvar)
 import Control.Lens.Fold ((^?), (^..), folded, preview)
 import Control.Lens.Review ((#), review)
 import Control.Lens.Tuple (_1, _2)
@@ -13,7 +13,7 @@ import Control.Monad ((<=<), unless)
 import Control.Monad.Except (MonadError, throwError)
 import Control.Monad.Trans (lift)
 import Data.Foldable (toList, foldl')
-import Data.Sequence (Seq, ViewL(..))
+import Data.Sequence ((<|), Seq, ViewL(..))
 
 import qualified Bound.Scope as Bound
 import qualified Data.Sequence as Seq
@@ -280,18 +280,38 @@ flexRigid = do
         _ -> pure ()
 
 intersect
-  :: Eq a
-  => Tm a
-  -> Scope () Tm a
-  -> Seq a
-  -> Seq a
-  -> Maybe (Tm a, a -> Tm a)
-intersect psi t a b =
-  -- TODO
-  case (Seq.viewl a, Seq.viewl b) of
-    (EmptyL, EmptyL) -> _
-    (x :< xs, y :< ys) -> _
-    _ -> error "intersect: impossible, input sequences must be the same length"
+  :: forall a b
+   . Eq b
+  => (b -> a)
+  -> Tm a -- ^ type of metavariable
+  -> Seq b -- ^ left spine
+  -> Seq b -- ^ right spine
+  -> Maybe (Tm a, a -> Tm a) -- ^ ( new type, new term given a metavariable )
+intersect = go []
+  where
+    go
+      :: forall a
+       . Seq b -- ^ variables in the spine that we're keeping
+      -> (b -> a)
+      -> Tm a -- ^ type of metavariable
+      -> Seq b -- ^ left spine
+      -> Seq b -- ^ right spine
+      -> Maybe (Tm a, a -> Tm a) -- ^ ( new type, new term given a metavariable )
+    go keptVars f t a b =
+      case (Seq.viewl a, Seq.viewl b) of
+        (EmptyL, EmptyL) -> _
+        (x :< xs, y :< ys)
+          | Pi ty body <- t ->
+              if x == y
+              then do
+                (resTy, resTm) <- go (x <| keptVars) (F . f) (fromScope body) xs ys
+                _
+              else do
+                (resTy, resTm) <- go keptVars (F . f) (fromScope body) xs ys
+                pure (_ resTy, Lam . toScope . resTm . F)
+              -- pure (Pi ty $ toScope resTy, Lam . toScope . resTm . F)
+          | otherwise -> Nothing
+        _ -> error "intersect: impossible, input sequences must be the same length"
 
 flexFlex
   :: ( Eq a, Show a
@@ -311,8 +331,8 @@ flexFlex = do
           | alpha == beta
           , alpha == (_V # v)
           , length xs == length ys
-          , Pi psi t <- tm -> do
-              case intersect psi t xs ys of
+          , Pi{} <- tm -> do
+              case intersect id tm xs ys of
                 Nothing -> pure ()
                 Just (newTy, mkNewTm) -> do
                   new <- fresh
