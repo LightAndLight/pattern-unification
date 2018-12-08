@@ -20,8 +20,7 @@ import Bound.Scope
 import Bound.Var (Var(..), unvar)
 import Control.Lens.Fold (preview)
 import Control.Lens.Prism (Prism', prism')
-import Control.Lens.Review (review)
-import Control.Lens.TH (makeClassyPrisms)
+import Control.Lens.Review ((#), review)
 import Control.Monad (ap)
 import Control.Monad.Trans.Class (lift)
 import Data.Deriving (deriveShow1, deriveEq1)
@@ -29,101 +28,6 @@ import Data.Maybe (fromMaybe)
 import Data.Sequence ((|>), Seq, ViewL(..), viewl)
 
 import qualified Bound.Scope as Bound
-
-{-
-data Tele f a
-  = More (Scope Int f a) (Tele f a)
-  | Done (Scope Int f a)
-  deriving (Functor, Foldable, Traversable)
-deriveShow1 ''Tele; deriving instance (Show1 f, Show a) => Show (Tele f a)
-instance (Monad f, Eq1 f) => Eq1 (Tele f) where
-  liftEq f (Done a) (Done b) = liftEq f a b
-  liftEq f (More a b) (More c d) = liftEq f a c && liftEq f b d
-  liftEq _ _ _ = False
-deriving instance (Monad f, Eq1 f, Eq a) => Eq (Tele f a)
-
-liftTele :: Monad f => f a -> Tele f a
-liftTele = Done . lift
-
-teleScope :: Monad f => Tele f a -> Scope Int f a
-teleScope (Done a) = a
-teleScope (More _ a) = teleScope a
-
-bitransverseTele
-  :: forall m f g a b
-   . Monad m
-  => (forall x x'. (x -> m x') -> f x -> m (g x'))
-  -> (a -> m b)
-  -> Tele f a
-  -> m (Tele g b)
-bitransverseTele f g = go
-  where
-    go :: Tele f a -> m (Tele g b)
-    go (Done s) = Done <$> bitransverseScope f g s
-    go (More a b) = More <$> bitransverseScope f g a <*> go b
-
-transverseTele
-  :: (Monad m, Traversable g)
-  => (forall x. f x -> m (g x))
-  -> Tele f a
-  -> m (Tele g a)
-transverseTele f = bitransverseTele (\p -> (traverse p =<<) . f) pure
-
-instantiate1 :: Functor f => f a -> Scope Int f a -> Scope Int f a
-instantiate1 a =
-  Scope .
-  fmap (unvar (\n -> if n == 0 then F a else B (n-1)) F) .
-  unscope
-
-abstract1 :: (Eq a, Monad f) => a -> Scope Int f a -> Scope Int f a
-abstract1 a =
-  toScope .
-  fmap (unvar (B . (+1)) (\a' -> if a == a' then B 0 else F a')) .
-  fromScope
-
-abstractTele
-  :: (Eq a, Monad f)
-  => a
-  -> Tele f a
-  -> Tele f a
-abstractTele a = go
-  where
-    go tele =
-      case tele of
-        Done s -> Done $ abstract1 a s
-        More b c -> More (abstract1 a b) (go c)
-
-instantiateTele
-  :: Monad f
-  => f a
-  -> Tele f a
-  -> Either (f a) (f a, Tele f a)
-instantiateTele tm tele =
-  case tele of
-    Done a -> Left $ goScope tm a
-    More a b -> Right (goScope tm a, go tm b)
-  where
-    goScope
-      :: Monad f
-      => f a
-      -> Scope Int f a
-      -> f a
-    goScope a =
-      (>>= unvar (\n -> if n == 0 then a else undefined) pure) .
-      fromScope
-
-    go
-      :: Monad f
-      => f a
-      -> Tele f a
-      -> Tele f a
-    go e (Done x) = Done $ instantiate1 e x
-    go e (More x y) = More (instantiate1 e x) (go e y)
-
-instance Bound Tele where
-  Done a >>>= f = Done (a >>>= f)
-  More a b >>>= f = More (a >>>= f) (b >>>= f)
--}
 
 data Elim f a
   = Elim_Tm (f a)
@@ -179,15 +83,14 @@ elim :: Show a => Tm a -> Elim Tm a -> Tm a
 elim (Pair a _) Elim_Fst = a
 elim (Pair _ b) Elim_Snd = b
 elim (Lam s) (Elim_Tm tm) = instantiate1 tm s
+elim (Var a) b = Neutral (Var a) [_Elim # b]
+elim (Neutral a b) c = Neutral a (b |> review _Elim c)
 elim a b = error $ "can't eliminate " <> show a <> " with " <> show b
 
 apply :: Tm a -> Tm a -> Tm a
 apply a (Lam b) = instantiate1 a b
 apply a (Neutral b c) = Neutral b $ c |> a
 apply a b = Neutral b [a]
-
-data Head a = V a | VL a | VR a
-  deriving (Eq, Show, Functor, Foldable, Traversable)
 
 data Tm a
   = Var a
@@ -255,60 +158,33 @@ instance AsNeutral (Tm a) a where
           Neutral (Var a) bs -> (,) a <$> traverse (preview _Elim) bs
           _ -> Nothing)
 
-{-
-evalTele :: (Show a, Eq a) => (a -> Tm a) -> Tele Tm a -> Tele Tm a
-evalTele ctx (Done s) = Done $ evalScope ctx s
-evalTele ctx (More s rest) = More (evalScope ctx s) (evalTele ctx rest)
+normalizeScope
+  :: (Show a, Show b)
+  => Scope b Tm a
+  -> Scope b Tm a
+normalizeScope = toScope . normalize . fromScope
 
-bitransverseTm
-  :: forall m a b
-   . Monad m
-  => (forall x x'. (x -> m x') -> Tm x -> m (Tm x'))
-  -> (a -> m b)
-  -> Tm a
-  -> m (Tm b)
-bitransverseTm f g = go
+normalize :: Show a => Tm a -> Tm a
+normalize = go
   where
-    go :: Monad m => Tm a -> m (Tm b)
     go tm =
       case tm of
-        Pi n a b -> Pi n <$> go a <*> bitransverseTele f g b
-        Lam n a -> Lam n <$> bitransverseScope f g a
-        Sigma a b -> Sigma <$> go a <*> bitransverseScope f g b
-        Pair a b -> Pair <$> go a <*> go b
-        Type -> pure Type
-        Fst -> pure Fst
-        Snd -> pure Snd
-        Neutral a bs -> Neutral <$> go a <*> traverse go bs
-        Var a -> Var <$> g a
-
-transverseTm
-  :: Monad m
-  => (forall x. Tm x -> m (Tm x))
-  -> Tm a
-  -> m (Tm a)
-transverseTm f = bitransverseTm (\p -> (traverse p =<<) . f) pure
-
-plateTm
-  :: Applicative m
-  => (forall x. Tm x -> m (Tm x))
-  -> Tm a -> m (Tm a)
-plateTm f = go
-  where
-    goTele (Done a) = Done <$> goScope a
-    goTele (More a b) = More <$> goScope a <*> goTele b
-
-    goScope = fmap toScope . f . fromScope
-
-    go tm =
-      case tm of
-        Pi n a b -> Pi n <$> f a <*> goTele b
-        Lam n a -> Lam n <$> goScope a
-        Sigma a b -> Sigma <$> f a <*> goScope b
-        Pair a b -> Pair <$> f a <*> f b
-        Neutral a bs -> Neutral <$> f a <*> traverse f bs
-        _ -> f tm
--}
+        Pi a b -> Pi (go a) (normalizeScope b)
+        Lam a -> Lam $ normalizeScope a
+        Sigma a b -> Sigma (go a) (normalizeScope b)
+        Pair a b -> Pair (go a) (go b)
+        Type -> Type
+        Fst -> Fst
+        Snd -> Snd
+        Neutral a bs ->
+          let
+            bs' =
+              fromMaybe (error "non-eliminator in spine") $
+              traverse (preview _Elim . go) bs
+          in
+            -- call by value
+            foldl elim (go a) bs'
+        Var a -> Var a
 
 evalScope
   :: ( Show a, Eq a
@@ -419,5 +295,3 @@ infer ctx (Neutral f xs) = do
             Pi s t | check ctx b s -> go (instantiate1 b t) bs
             _ -> Nothing
 infer _ _ = Nothing
-
-makeClassyPrisms ''Head

@@ -17,10 +17,9 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     LambdaPi
-                     , Equation
+                     , Constraint
                      , Unification
-                     , Solver
-                     , Solver.Class
+                     , Meta
                      , Supply
                      , Supply.Class
   build-depends:       base >=4.11 && <4.12
