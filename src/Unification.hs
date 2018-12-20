@@ -1,342 +1,89 @@
-{-# language FlexibleContexts #-}
-{-# language OverloadedLists #-}
+{-# language LambdaCase #-}
 {-# language ScopedTypeVariables #-}
-{-# language ViewPatterns #-}
 module Unification where
 
-import Bound.Scope (Scope, instantiate1, fromScope, toScope)
-import Bound.Var (Var(..), unvar)
-import Control.Lens.Fold ((^?), (^..), folded, preview)
-import Control.Lens.Review ((#), review)
-import Control.Lens.Tuple (_1, _2)
-import Control.Monad ((<=<), unless)
-import Control.Monad.Except (MonadError, throwError)
-import Control.Monad.Trans (lift)
-import Data.Foldable (toList, foldl')
-import Data.Sequence ((<|), Seq, ViewL(..))
+import Bound.Scope (fromScope)
+import Data.Bifunctor (Bifunctor(..))
 
-import qualified Bound.Scope as Bound
-import qualified Data.Sequence as Seq
-
-import Equation
 import LambdaPi
-import Supply.Class
-import Solver.Class
 
-data UnifyError f a
-  = Mismatch
-  { errLhsTm :: Tm (f a)
-  , errLhsTy :: Tm (f a)
-  , errRhsTm :: Tm (f a)
-  , errRhsTy :: Tm (f a)
-  }
-  | NotFound a
-  | ExpectedTwin a
-  | ExpectedOnly a
+data Meta a b = M a | N b
   deriving (Eq, Show)
 
-getTwin
-  :: (MonadError (UnifyError f a) m, Eq a)
-  => [(a, CtxEntry (f a))]
-  -> a
-  -> m (Tm (f a), Tm (f a))
-getTwin ctx a = do
-  a' <- maybe (throwError $ NotFound a) pure $ lookup a ctx
-  case a' of
-    Twin x y -> pure (x, y)
-    _ -> throwError $ ExpectedTwin a
+instance Functor (Meta a) where
+  fmap _ (M a) = M a
+  fmap f (N a) = N (f a)
 
-getOnly
-  :: (MonadError (UnifyError f a) m, Eq a)
-  => [(a, CtxEntry (f a))]
-  -> a
-  -> m (Tm (f a))
-getOnly ctx a = do
-  a' <- maybe (throwError $ NotFound a) pure $ lookup a ctx
-  case a' of
-    Only x -> pure x
-    _ -> throwError $ ExpectedOnly a
+instance Applicative (Meta a) where
+  pure = N
+  N f <*> N a = N (f a)
+  M a <*> _ = M a
+  _ <*> M a = M a
 
-eta
-  :: ( Eq a, Show a
-     , MonadSupply a m
-     , MonadError (UnifyError Meta a) m
-     )
-  => Equation Meta a -> m [Equation Meta a]
-eta (Equation ctx a (Pi b c) a' (Pi b' c')) = do
-  x <- fresh
-  pure
-    [ Equation ((x, Twin b b') : ctx)
-        (apply (Var $ _VL # x) a ) (apply (Var $ _VL # x) (Lam c ))
-        (apply (Var $ _VR # x) a') (apply (Var $ _VR # x) (Lam c'))
-    ]
-eta (Equation ctx a (Sigma b c) a' (Sigma b' c')) =
-  pure
-  [ Equation ctx
-      aFst b
-      aFst b'
-  , Equation ctx
-      (Neutral a  [Snd]) (Bound.instantiate1 aFst  c )
-      (Neutral a' [Snd]) (Bound.instantiate1 a'Fst c')
-  ]
+instance Bifunctor Meta where
+  bimap f _ (M a) = M (f a)
+  bimap _ g (N a) = N (g a)
+
+data Solution a b = Solution a (Tm (Meta a b))
+
+type TmM a b = Tm (Meta a b)
+
+data Result a b
+  = Postpone
+  | Failure
+  | Success (Maybe (Solution a b), Maybe (TmM a b))
+
+occurs :: forall a b. (Eq a, Eq b) => a -> TmM a b -> Bool
+occurs a tm =
+  case tm of
+    Var{} -> go False False tm
+    Fst{} -> go False False tm
+    Snd{} -> go False False tm
+    Lam s -> go False False (sequenceA <$> fromScope s)
+    Pair b c -> go False False b || go False False c
+    Neutral (Var (M _)) cs -> any (go True False) cs
+    Neutral (Var (N _)) cs -> any (go False True) cs
+    Neutral _ cs -> any (go False False) cs
   where
-    aFst = Neutral a [Fst]
-    a'Fst = Neutral a' [Fst]
--- TODO can this system solve universe constraints?
-eta (Equation _ Type Type Type Type) = pure []
-eta (Equation ctx (Pi a b) Type (Pi a' b') Type) =
-  pure
-  [ Equation ctx
-      a  Type
-      a' Type
-  , Equation ctx
-      (Lam b ) (Pi a  $ lift Type)
-      (Lam b') (Pi a' $ lift Type)
-  ]
-eta (Equation ctx (Sigma a b) Type (Sigma a' b') Type) =
-  pure
-  [ Equation ctx
-      a  Type
-      a' Type
-  , Equation ctx
-      (Lam b)  (Pi a  $ lift Type)
-      (Lam b') (Pi a' $ lift Type)
-  ]
-eta (Equation ctx tm1@(Neutral v _) _ tm2@(Neutral v' _) _)
-  | Just a <- v ^? _Var._V
-  , Just a' <- v' ^? _Var._V = do
-  aTy <- getOnly ctx a
-  a'Ty <- getOnly ctx a'
-  unless (a == a') .
-    throwError $ Mismatch (Var $ _V # a) aTy (Var $ _V # a') a'Ty
-  (Equation ctx aTy Type a'Ty Type :) <$>
-    matchSpines ctx (aTy, tm1) (a'Ty, tm2)
-eta (Equation ctx tm1@(Neutral v _) _ tm2@(Neutral v' _) _)
-  | Just a <- v ^? _Var._VL
-  , Just a' <- v' ^? _Var._VR = do
-    (aTyL, _) <- getTwin ctx a
-    (_, a'TyR) <- getTwin ctx a'
-    unless (a == a') .
-      throwError $ Mismatch (Var $ _VL # a) aTyL (Var $ _VR # a') a'TyR
-    (Equation ctx aTyL Type a'TyR Type :) <$>
-      matchSpines ctx (aTyL, tm1) (a'TyR, tm2)
-eta (Equation _ a b a' b') = throwError $ Mismatch a b a' b'
+    isVar Var{} = True
+    isVar _ = False
 
-matchSpines
-  :: forall a m
-   . (Show a, MonadError (UnifyError Meta a) m)
-  => [(a, CtxEntry (Meta a))]
-  -> (Tm (Meta a), Tm (Meta a))
-  -> (Tm (Meta a), Tm (Meta a))
-  -> m [Equation Meta a]
-matchSpines ctx (headTy, a1) (headTy', a2) = do
-  (hd, as) <-
-    maybe
-      (error $ show a1 <> " is not a neutral term")
-      pure
-      (a1 ^? _Neutral)
-  (hd', as') <-
-    maybe
-      (error $ show a2 <> " is not a neutral term")
-      pure
-      (a2 ^? _Neutral)
-  go (headTy, Var hd, as) (headTy', Var hd', as')
-  where
-    go
-      :: (Show a, MonadError (UnifyError Meta a) m)
-      => (Tm (Meta a), Tm (Meta a), Seq (Elim Tm (Meta a)))
-      -> (Tm (Meta a), Tm (Meta a), Seq (Elim Tm (Meta a)))
-      -> m [Equation Meta a]
-    go (ty, hd, as) (ty', hd', as') =
-      case (Seq.viewl as, Seq.viewl as') of
-        (EmptyL, EmptyL) -> pure []
-        (x :< xs, y :< ys) ->
-          case (ty, ty') of
-            (Pi a b, Pi a' b') ->
-              case (x, y) of
-                (Elim_Tm c, Elim_Tm c') ->
-                  (Equation ctx c a c' a' :) <$>
-                  go
-                    (instantiate1 c  $ b , apply c  hd , xs)
-                    (instantiate1 c' $ b', apply c' hd', ys)
-                _ ->
-                  error $
-                  "spines don't match:\n\n" <>
-                  show x <>
-                  "\n\nand\n\n" <>
-                  show y
-            (Sigma a b, Sigma a' b') ->
-              case (x, y) of
-                (Elim_Fst, Elim_Fst) ->
-                  go
-                    (a , elim hd  Elim_Fst, xs)
-                    (a', elim hd' Elim_Fst, ys)
-                (Elim_Snd, Elim_Snd) ->
-                  go
-                    ( Bound.instantiate1 (apply Fst hd ) b
-                    , elim hd Elim_Snd
-                    , xs
-                    )
-                    ( Bound.instantiate1 (apply Fst hd') b'
-                    , elim hd' Elim_Snd
-                    , ys
-                    )
-                _ ->
-                  error $
-                  "spines don't match:\n\n" <>
-                  show x <>
-                  "\n\nand\n\n" <>
-                  show y
-            _ ->
-              error $
-              "head types are not eliminatable:\n\n" <>
-              show ty <>
-              "\n\nand\n\n" <>
-              show ty'
-        -- failure cases? the paper says the spines must be the same length
-        (_ :< _, EmptyL) ->
-          error $
-          "spines are different lengths:\n\n" <>
-          show as <>
-          "\n\nand\n\n" <> show as'
-        (EmptyL, _ :< _) ->
-          error $
-          "spines are different lengths:\n\n" <>
-          show as <>
-          "\n\nand\n\n" <>
-          show as'
+    go :: forall c. (Eq a, Eq c) => Bool -> Bool -> TmM a c -> Bool
+    go _ _ (Var (M b)) = a == b
+    go _ _ (Var (N _)) = False
+    go _ _ Fst{} = False
+    go _ _ Snd{} = False
+    go inMeta inVar (Lam s) = go inMeta inVar (sequenceA <$> fromScope s)
+    go inMeta inVar (Pair d e) = go inMeta inVar d || go inMeta inVar e
+    go inMeta inVar (Neutral (Var (M b)) cs)
+      | a == b =
+        if inVar
+        then any ((||) <$> isVar <*> go True False) cs
+        else
+          if inMeta
+          then any (go True False) cs
+          else True
+      | otherwise = any (go True False) cs
+    go _ _ (Neutral (Var (N _)) cs) = any (go False True) cs
+    go _ _ (Neutral _ cs) = any (go False False) cs
 
--- | @a \`linearOn\` b@ means:
---
--- @forall x. x `elem` b ==> length (filter (==x) b) == length (filter (==x) a)@
-linearOn :: (Eq a, Foldable f, Foldable g) => f a -> g a -> Bool
-linearOn a b =
-  all (\x -> count x b == count x a) b
-  where
-    count :: (Eq a, Foldable f) => a -> f a -> Int
-    count c = foldl' (\acc x -> if x == c then acc + 1 else acc) 0
+ex1 :: Bool
+ex1 =
+  occurs "alpha" $
+  Var (N "x") .@ (Var (M "alpha") .@ Var (N "x"))
 
-strongRigidIn :: Eq a => a -> Tm (Meta a) -> Bool
-strongRigidIn a = go (== M a) False
-  where
-    goScope f s = go (unvar (const False) f) False $ fromScope s
+ex2 :: Bool
+ex2 =
+  occurs "beta" $
+  Var (N "x") .@ (Var (M "beta") .@ lam (N "x") (Var $ N "x"))
 
-    go :: (Eq a, Eq (f a)) => (f a -> Bool) -> Bool -> Tm (f a) -> Bool
-    go f inSpine tm =
-      case tm of
-        Pi b c -> go f False b || goScope f c
-        Lam b -> goScope f b
-        Sigma b c -> go f False b || goScope f c
-        Pair b c -> go f False b || go f False c
-        Neutral b cs -> go f False b || any (go f True) cs
-        Var b -> not inSpine && f b
-        Type -> False
-        Fst -> False
-        Snd -> False
-
-flexRigid
-  :: ( Eq a, Show a
-     , MonadSupply a m
-     , AsSolverError e a, MonadError e m
-     , MonadSolver a m
-     )
-  => m ()
-flexRigid = do
-  l <- lookLeft
-  fullCtx <- getContext
-  case l of
-    Nothing -> error "flexRigid: nothing to the left"
-    Just MetaProblem{} -> swapLeft
-    Just (MetaDecl a aTy) -> do
-      p <- currentProblem
-      case p of
-        Just (Problem sig eq)
-          | Equation ctx tm ty tm' ty' <- eq ->
-            case tm ^? _Neutral of
-              Just (M a', xs)
-                | strongRigidIn a' tm' -> throwError $ _Occurs # (M a', tm')
-                | a == a'
-                , Just xs' <- traverse (preview $ _Tm._Var._V) xs
-                , notElem a $
-                    (sig ^.. folded._2.folded._M) <>
-                    (tm' ^.. folded._M)
-                , xs' `linearOn` (tm' ^.. folded._V)
-                , solution <- foldr lam tm' (review _V <$> toList xs')
-                , check (flip lookup (fullCtx <> sig) <=< preview _M) solution aTy -> solve a solution *> dissolve
-              _ ->
-                if
-                  a `elem`
-                  (sig ^.. folded._2.folded._M) <>
-                  (ctx ^.. folded._2.folded._M) <>
-                  (tm ^.. folded._M) <>
-                  (ty ^.. folded._M) <>
-                  (tm' ^.. folded._M) <>
-                  (ty' ^.. folded._M)
-                then
-                  case tm ^? _Neutral._1._M of
-                    Just a' | a == a' -> pure ()
-                    _ -> expandSig
-                else swapLeft
-        _ -> pure ()
-
-intersect
-  :: forall a b
-   . Eq b
-  => (b -> a)
-  -> Tm a -- ^ type of metavariable
-  -> Seq b -- ^ left spine
-  -> Seq b -- ^ right spine
-  -> Maybe (Tm a, a -> Tm a) -- ^ ( new type, new term given a metavariable )
-intersect = go []
-  where
-    go
-      :: forall a
-       . Seq b -- ^ variables in the spine that we're keeping
-      -> (b -> a)
-      -> Tm a -- ^ type of metavariable
-      -> Seq b -- ^ left spine
-      -> Seq b -- ^ right spine
-      -> Maybe (Tm a, a -> Tm a) -- ^ ( new type, new term given a metavariable )
-    go keptVars f t a b =
-      case (Seq.viewl a, Seq.viewl b) of
-        (EmptyL, EmptyL) -> _
-        (x :< xs, y :< ys)
-          | Pi ty body <- t ->
-              if x == y
-              then do
-                (resTy, resTm) <- go (x <| keptVars) (F . f) (fromScope body) xs ys
-                _
-              else do
-                (resTy, resTm) <- go keptVars (F . f) (fromScope body) xs ys
-                pure (_ resTy, Lam . toScope . resTm . F)
-              -- pure (Pi ty $ toScope resTy, Lam . toScope . resTm . F)
-          | otherwise -> Nothing
-        _ -> error "intersect: impossible, input sequences must be the same length"
-
-flexFlex
-  :: ( Eq a, Show a
-     , MonadSupply a m
-     , AsSolverError e a, MonadError e m
-     , MonadSolver a m
-     )
-  => m ()
-flexFlex = do
-  maybeEntry <- lookLeft
-  maybeProb <- currentProblem
-  case (maybeEntry, maybeProb) of
-    (Just (MetaDecl v tm), Just prob) -> do
-      let Problem sig (Equation gamma x xTy y yTy) = prob
-      case (,) <$> (x ^? _Neutral) <*> (y ^? _Neutral) of
-        Just ((alpha, traverse (^? _Tm._Var) -> Just xs), (beta, traverse (^? _Tm._Var) -> Just ys))
-          | alpha == beta
-          , alpha == (_V # v)
-          , length xs == length ys
-          , Pi{} <- tm -> do
-              case intersect id tm xs ys of
-                Nothing -> pure ()
-                Just (newTy, mkNewTm) -> do
-                  new <- fresh
-                  _
-          | otherwise -> _
-        _ -> pure ()
-    _ -> pure ()
+solve :: (Eq a, Eq b) => TmM a b -> TmM a b -> Result a b
+solve (Neutral (Var (M a)) xs) (Neutral (Var (M b)) ys)
+  | a == b = _
+  | otherwise = _
+solve (Neutral (Var (M a)) xs) y = _
+solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
+solve a b =
+  if a == b
+  then Success (Nothing, Nothing)
+  else Failure

@@ -19,11 +19,9 @@ library
   exposed-modules:     LambdaPi
                      , Equation
                      , Unification
-                     , Solver
-                     , Solver.Class
                      , Supply
                      , Supply.Class
-  build-depends:       base >=4.11 && <4.12
+  build-depends:       base >=4.11 && <5
                      , bound
                      , lens
                      , deriving-compat
