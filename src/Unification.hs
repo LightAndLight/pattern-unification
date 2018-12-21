@@ -4,8 +4,7 @@
 {-# language ScopedTypeVariables #-}
 module Unification where
 
-import Bound.Scope (fromScope, toScope)
-import Bound.Var (Var(..))
+import Bound.Scope (fromScope)
 import Control.Monad.State (MonadState, evalState, gets, modify)
 import Control.Monad.Trans (lift)
 import Data.DList (DList)
@@ -112,40 +111,63 @@ distinctVarsContaining tms tm =
 
 -- | Compute a term that solves a flex-flex equation by intersection
 --
--- 
+-- @O(n^2)@
 intersect
   :: forall a b
    . (Eq a, Eq b)
   => Seq (TmM a b)
   -> Seq (TmM a b)
   -> Maybe (a -> TmM a b)
-intersect = go (Lam . toScope)
+intersect = go id
   where
     go
-      :: (Tm (Var () (Meta a b)) -> Tm (Meta a b))
+      :: ((a -> TmM a b) -> a -> TmM a b)
       -> Seq (TmM a b)
       -> Seq (TmM a b)
       -> Maybe (a -> TmM a b)
     go f a b =
       case (Seq.viewl a, Seq.viewl b) of
-        (EmptyL, EmptyL) -> Just (f . Var . F . M)
+        (EmptyL, EmptyL) -> Just $ f (Var . M)
         (Var (N x) :< xs, Var (N y) :< ys) ->
           if x == y
 
           -- The two varables agree
-                  -- O(?)
-          -- then go (\rhs -> lam (N x) $ f (rhs .@ Var (N x))) xs ys
-          then go (\rhs -> Lam $ toScope (rhs .@ Var (B ()))) xs ys
+                  -- O(n) (?)
+          then go (\ff -> f $ \m -> lam (N x) $ ff m .@ Var (N x)) xs ys
 
           -- The two variables disagree, so the solution ignores them
                   -- O(1)
-          else go (Lam . lift . f) xs ys
+          else go (\ff -> f $ Lam . lift . ff) xs ys
         _ -> Nothing
 
 ex3 :: TmM String String
 ex3 = res "alpha"
   where
     Just res = intersect [Var (N "x"), Var (N "x")] [Var (N "x"), Var (N "y")]
+
+ex4 :: TmM String String
+ex4 = res "alpha"
+  where
+    Just res =
+      intersect
+        [Var (N "x"), Var (N "x"), Var (N "x")]
+        [Var (N "x"), Var (N "y"), Var (N "z")]
+
+ex5 :: TmM String String
+ex5 = res "alpha"
+  where
+    Just res =
+      intersect
+        [Var (N "x"), Var (N "y"), Var (N "x")]
+        [Var (N "x"), Var (N "y"), Var (N "z")]
+
+ex6 :: TmM String String
+ex6 = res "alpha"
+  where
+    Just res =
+      intersect
+        [Var (N "x"), Var (N "y"), Var (N "x")]
+        [Var (N "y"), Var (N "y"), Var (N "z")]
 
 data Result a b
   = Postpone
@@ -171,5 +193,4 @@ solve a b =
   if a == b
   then Success (Nothing, Nothing)
   else Failure
-
 -}
