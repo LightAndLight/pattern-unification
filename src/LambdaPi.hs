@@ -22,9 +22,14 @@ import Control.Lens.Fold (preview)
 import Control.Lens.Prism (Prism', prism')
 import Control.Lens.Review (review)
 import Control.Monad (ap)
+import Data.Bifunctor (Bifunctor(..), first)
 import Data.Deriving (deriveShow1, deriveEq1)
+import Data.Foldable (toList)
 import Data.Maybe (fromMaybe)
 import Data.Sequence ((|>), Seq)
+import Text.PrettyPrint.ANSI.Leijen (Doc, Pretty(..))
+
+import qualified Text.PrettyPrint.ANSI.Leijen as Print
 
 
 data Elim f a
@@ -84,9 +89,9 @@ elim (Lam s) (Elim_Tm tm) = instantiate1 tm s
 elim a b = error $ "can't eliminate " <> show a <> " with " <> show b
 
 (.@) :: Tm a -> Tm a -> Tm a
-(.@) a (Lam b) = instantiate1 a b
-(.@) a (Neutral b c) = Neutral b $ c |> a
-(.@) a b = Neutral b [a]
+(.@) (Lam a) b = instantiate1 b a
+(.@) (Neutral a b) c = Neutral a $ b |> c
+(.@) a b = Neutral a [b]
 
 infixl 5 .@
 
@@ -174,3 +179,59 @@ eval ctx = go
             -- call by value
             foldl elim (go a) bs'
         Var a -> fromMaybe tm $ ctx a
+
+data Meta a b = M a | N b
+  deriving (Eq, Show)
+
+instance Functor (Meta a) where
+  fmap _ (M a) = M a
+  fmap f (N a) = N (f a)
+
+instance Applicative (Meta a) where
+  pure = N
+  N f <*> N a = N (f a)
+  M a <*> _ = M a
+  _ <*> M a = M a
+
+instance Bifunctor Meta where
+  bimap f _ (M a) = M (f a)
+  bimap _ g (N a) = N (g a)
+
+instance Pretty a => Pretty (Tm a) where
+  pretty = prettyTm pretty
+
+instance (Pretty a, Pretty b) => Pretty (Meta a b) where
+  pretty = prettyMeta pretty pretty
+
+prettyMeta :: (a -> Doc) -> (b -> Doc) -> Meta a b -> Doc
+prettyMeta f _ (M a) = Print.text "?" <> f a
+prettyMeta _ g (N a) = g a
+
+prettyTm :: forall a. (a -> Doc) -> Tm a -> Doc
+prettyTm aDoc = go Right
+  where
+    go :: forall b. (b -> Either Int a) -> Tm b -> Doc
+    go ctx tm =
+      case tm of
+        Var a -> either Print.int aDoc $ ctx a
+        Lam s ->
+          Print.hsep
+          [ Print.char 'λ' <> Print.dot
+          , go (unvar (const $ Left 0) (first (+1) . ctx)) $ fromScope s
+          ]
+        Pair a b ->
+          Print.hsep
+          [ Print.char '〈'
+          , go ctx a
+          , Print.comma
+          , go ctx b
+          , Print.char '〉'
+          ]
+        Fst -> Print.text "fst"
+        Snd -> Print.text "snd"
+        Neutral x xs ->
+          Print.hsep $
+          [ go ctx x
+          , Print.char '•'
+          ] <>
+          toList (go ctx <$> xs)

@@ -1,37 +1,27 @@
+{-# language FlexibleContexts #-}
 {-# language LambdaCase #-}
+{-# language OverloadedLists #-}
 {-# language ScopedTypeVariables #-}
 module Unification where
 
-import Bound.Scope (fromScope)
-import Data.Bifunctor (Bifunctor(..))
+import Bound.Scope (fromScope, toScope)
+import Bound.Var (Var(..))
+import Control.Monad.State (MonadState, evalState, gets, modify)
+import Control.Monad.Trans (lift)
+import Data.DList (DList)
+import Data.Monoid (Ap(..))
+import Data.Set (Set)
+import Data.Sequence (Seq, ViewL(..))
+
+import qualified Data.DList as DList
+import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
 
 import LambdaPi
-
-data Meta a b = M a | N b
-  deriving (Eq, Show)
-
-instance Functor (Meta a) where
-  fmap _ (M a) = M a
-  fmap f (N a) = N (f a)
-
-instance Applicative (Meta a) where
-  pure = N
-  N f <*> N a = N (f a)
-  M a <*> _ = M a
-  _ <*> M a = M a
-
-instance Bifunctor Meta where
-  bimap f _ (M a) = M (f a)
-  bimap _ g (N a) = N (g a)
 
 data Solution a b = Solution a (Tm (Meta a b))
 
 type TmM a b = Tm (Meta a b)
-
-data Result a b
-  = Postpone
-  | Failure
-  | Success (Maybe (Solution a b), Maybe (TmM a b))
 
 occurs :: forall a b. (Eq a, Eq b) => a -> TmM a b -> Bool
 occurs a tm =
@@ -77,13 +67,109 @@ ex2 =
   occurs "beta" $
   Var (N "x") .@ (Var (M "beta") .@ lam (N "x") (Var $ N "x"))
 
-solve :: (Eq a, Eq b) => TmM a b -> TmM a b -> Result a b
+-- |
+-- Determine whether the container is comprised of distinct variables,
+-- and if that set of variables contains all the variables present in another term
+--
+-- @O(n * log(n))@
+distinctVarsContaining
+  :: forall t a b
+   . (Traversable t, Ord b)
+  => t (TmM a b)
+  -> TmM a b
+  -> Maybe [b]
+distinctVarsContaining tms tm =
+  fmap DList.toList $
+  evalState
+    (do
+        res <- getAp $ foldMap (Ap . go) tms
+        isContained <- gets (contained `Set.isSubsetOf`)
+        pure $ if isContained then res else Nothing)
+    Set.empty
+  where
+    contained =
+      foldr
+        (\a b ->
+           case a of
+             M{} -> b
+             N a' -> Set.insert a' b)
+        Set.empty
+        tm
+
+    go
+      :: (MonadState (Set b) m, Ord b)
+      => TmM a b
+      -> m (Maybe (DList b))
+    go (Var a) =
+      case a of
+        M{} -> pure Nothing
+        N b -> do
+          res <- gets $ Set.member b
+          if res
+            then pure Nothing
+            else Just (DList.singleton b) <$ modify (Set.insert b)
+    go _ = pure Nothing
+
+-- | Compute a term that solves a flex-flex equation by intersection
+--
+-- 
+intersect
+  :: forall a b
+   . (Eq a, Eq b)
+  => Seq (TmM a b)
+  -> Seq (TmM a b)
+  -> Maybe (a -> TmM a b)
+intersect = go (Lam . toScope)
+  where
+    go
+      :: (Tm (Var () (Meta a b)) -> Tm (Meta a b))
+      -> Seq (TmM a b)
+      -> Seq (TmM a b)
+      -> Maybe (a -> TmM a b)
+    go f a b =
+      case (Seq.viewl a, Seq.viewl b) of
+        (EmptyL, EmptyL) -> Just (f . Var . F . M)
+        (Var (N x) :< xs, Var (N y) :< ys) ->
+          if x == y
+
+          -- The two varables agree
+                  -- O(?)
+          -- then go (\rhs -> lam (N x) $ f (rhs .@ Var (N x))) xs ys
+          then go (\rhs -> Lam $ toScope (rhs .@ Var (B ()))) xs ys
+
+          -- The two variables disagree, so the solution ignores them
+                  -- O(1)
+          else go (Lam . lift . f) xs ys
+        _ -> Nothing
+
+ex3 :: TmM String String
+ex3 = res "alpha"
+  where
+    Just res = intersect [Var (N "x"), Var (N "x")] [Var (N "x"), Var (N "y")]
+
+data Result a b
+  = Postpone
+  | Failure
+  | Success (Maybe (Solution a b), Maybe (TmM a b))
+
+{-
+solve :: (Eq a, Ord b) => TmM a b -> TmM a b -> Result a b
 solve (Neutral (Var (M a)) xs) (Neutral (Var (M b)) ys)
-  | a == b = _
+  | a == b
+  , Just tm <- intersect xs ys = _
   | otherwise = _
-solve (Neutral (Var (M a)) xs) y = _
+solve (Neutral (Var (M a)) xs) y
+  | occurs a y = Failure
+  | Just vars <- distinctVarsContaining xs y =
+    Success
+    ( Just . Solution a $ foldr (lam . N) y vars
+    , Nothing
+    )
+  | otherwise = Postpone
 solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
 solve a b =
   if a == b
   then Success (Nothing, Nothing)
   else Failure
+
+-}

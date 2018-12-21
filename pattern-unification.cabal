@@ -23,11 +23,13 @@ library
                      , Supply.Class
   build-depends:       base >=4.11 && <5
                      , bound
+                     , dlist
                      , lens
                      , deriving-compat
                      , transformers
                      , containers
                      , mtl
+                     , ansi-wl-pprint
   hs-source-dirs:      src
   ghc-options:         -Wall -Werror
   default-language:    Haskell2010
