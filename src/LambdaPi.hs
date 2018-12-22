@@ -183,6 +183,11 @@ eval ctx = go
 data Meta a b = M a | N b
   deriving (Eq, Show)
 
+metaVar :: Meta a (Var b c) -> Var b (Meta a c)
+metaVar (M a) = F (M a)
+metaVar (N (B a)) = B a
+metaVar (N (F a)) = F (N a)
+
 instance Functor (Meta a) where
   fmap _ (M a) = M a
   fmap f (N a) = N (f a)

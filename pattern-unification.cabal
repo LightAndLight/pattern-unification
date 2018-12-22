@@ -30,6 +30,8 @@ library
                      , containers
                      , mtl
                      , ansi-wl-pprint
+                     , church-maybe
+                     , semigroupoids
   hs-source-dirs:      src
   ghc-options:         -Wall -Werror
   default-language:    Haskell2010

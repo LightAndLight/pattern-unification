@@ -4,19 +4,26 @@
 {-# language ScopedTypeVariables #-}
 module Unification where
 
-import Bound.Scope (fromScope)
+import Bound.Scope (Scope(..), fromScope, toScope)
+import Bound.Var (Var(..), unvar)
+import Control.Monad (guard)
 import Control.Monad.State (MonadState, evalState, gets, modify)
 import Control.Monad.Trans (lift)
+import Control.Monad.Writer.Strict (WriterT(..), runWriterT)
 import Data.DList (DList)
+import Data.Functor.Apply ((<.>))
+import Data.List.NonEmpty (NonEmpty)
 import Data.Monoid (Ap(..))
 import Data.Set (Set)
 import Data.Sequence (Seq, ViewL(..))
 
+import qualified Data.Church.Maybe as Church
 import qualified Data.DList as DList
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 
 import LambdaPi
+import Supply.Class
 
 data Solution a b = Solution a (Tm (Meta a b))
 
@@ -118,32 +125,38 @@ intersect
   => Seq (TmM a b)
   -> Seq (TmM a b)
   -> Maybe (a -> TmM a b)
-intersect = go id
+intersect l m =
+  -- use a church-encoded maybe for proper tail recursion
+  Church.maybe Nothing Just $
+  (\f -> f . Var . M) <$> go l m
   where
     go
-      :: ((a -> TmM a b) -> a -> TmM a b)
-      -> Seq (TmM a b)
-      -> Seq (TmM a b)
-      -> Maybe (a -> TmM a b)
-    go f a b =
+      :: forall c
+       . Seq (Tm (Meta a b))
+      -> Seq (Tm (Meta a b))
+      -> Church.Maybe (Tm c -> Tm c)
+    go a b =
       case (Seq.viewl a, Seq.viewl b) of
-        (EmptyL, EmptyL) -> Just $ f (Var . M)
+        (EmptyL, EmptyL) -> Church.just id
         (Var (N x) :< xs, Var (N y) :< ys) ->
           if x == y
 
           -- The two varables agree
                   -- O(n) (?)
-          then go (\ff -> f $ \m -> lam (N x) $ ff m .@ Var (N x)) xs ys
+          then (\f xx -> Lam $ Scope $ f $ fmap (F . Var) xx .@ Var (B ())) <$> go xs ys
 
           -- The two variables disagree, so the solution ignores them
                   -- O(1)
-          else go (\ff -> f $ Lam . lift . ff) xs ys
-        _ -> Nothing
+          else (\f -> Lam . lift . f) <$> go xs ys
+        _ -> Church.nothing
 
 ex3 :: TmM String String
 ex3 = res "alpha"
   where
-    Just res = intersect [Var (N "x"), Var (N "x")] [Var (N "x"), Var (N "y")]
+    Just res =
+      intersect
+        [Var (N "x"), Var (N "x")]
+        [Var (N "x"), Var (N "y")]
 
 ex4 :: TmM String String
 ex4 = res "alpha"
@@ -169,28 +182,84 @@ ex6 = res "alpha"
         [Var (N "x"), Var (N "y"), Var (N "x")]
         [Var (N "y"), Var (N "y"), Var (N "z")]
 
+-- | Build a lambda that prunes out of scope variables
+--
+-- @O(n^2)@
+pruneArgs
+  :: forall a b
+   . Ord b
+  => Set b
+  -> Seq (TmM a b)
+  -> (a -> TmM a b)
+pruneArgs keep tm = go tm . Var . M
+  where
+    go
+      :: forall c
+       . Seq (Tm (Meta a b))
+      -> (Tm c -> Tm c)
+    go a =
+      case Seq.viewl a of
+        EmptyL -> id
+        Var (N x) :< xs ->
+          if x `Set.member` keep
+
+          then \xx -> Lam $ Scope $ go xs $ fmap (F . Var) xx .@ Var (B ())
+
+          else Lam . lift . go xs
+
+prune
+  :: forall a b
+   . Ord b
+  => Set b
+  -> TmM a b
+  -> Maybe (TmM a b, NonEmpty (Solution a b))
+prune keep =
+  runWriterT .
+  go (\x -> x <$ guard (Set.member x keep))
+  where
+    go
+      :: forall c
+       . (c -> Maybe b)
+      -> TmM a c
+      -> WriterT (NonEmpty (Solution a b)) Maybe (TmM a c)
+    go _ Var{} = WriterT Nothing
+    go ctx (Lam s) =
+      Lam . toScope . fmap metaVar <$>
+      go (unvar (const Nothing) ctx) (sequenceA <$> fromScope s)
+    go ctx (Pair a b) = Pair <$> go ctx a <.> go ctx b
+    go _ Fst = WriterT Nothing
+    go _ Snd = WriterT Nothing
+    go ctx (Neutral (Var (M a)) xs) = _
+    go ctx (Neutral (Var (N a)) xs) = _
+
 data Result a b
   = Postpone
   | Failure
   | Success (Maybe (Solution a b), Maybe (TmM a b))
 
-{-
-solve :: (Eq a, Ord b) => TmM a b -> TmM a b -> Result a b
+solve
+  :: (Eq a, Ord b, MonadSupply a m)
+  => TmM a b
+  -> TmM a b
+  -> m (Result a b)
 solve (Neutral (Var (M a)) xs) (Neutral (Var (M b)) ys)
   | a == b
-  , Just tm <- intersect xs ys = _
+  , Just tm <- intersect xs ys = do
+      mv <- fresh
+      pure $ Success (Just $ Solution a $ tm mv, Nothing)
   | otherwise = _
 solve (Neutral (Var (M a)) xs) y
-  | occurs a y = Failure
+  | occurs a y = pure Failure
   | Just vars <- distinctVarsContaining xs y =
-    Success
-    ( Just . Solution a $ foldr (lam . N) y vars
-    , Nothing
-    )
-  | otherwise = Postpone
+      pure $
+      Success
+      ( Just . Solution a $ foldr (lam . N) y vars
+      , Nothing
+      )
+  | otherwise = pure Postpone
 solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
 solve a b =
+  pure $
   if a == b
   then Success (Nothing, Nothing)
   else Failure
--}
