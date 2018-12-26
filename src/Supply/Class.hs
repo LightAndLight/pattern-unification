@@ -8,6 +8,7 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Trans.Class (MonadTrans(..))
+import Control.Monad.Trans.Maybe (MaybeT)
 import Control.Monad.Writer (WriterT)
 
 class Monad m => MonadSupply a m | m -> a where
@@ -20,3 +21,4 @@ instance MonadSupply a m => MonadSupply a (ExceptT e m)
 instance MonadSupply a m => MonadSupply a (ReaderT r m)
 instance MonadSupply a m => MonadSupply a (StateT s m)
 instance (MonadSupply a m, Monoid w) => MonadSupply a (WriterT w m)
+instance MonadSupply a m => MonadSupply a (MaybeT m)
