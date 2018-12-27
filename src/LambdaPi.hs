@@ -180,26 +180,68 @@ eval ctx = go
             foldl elim (go a) bs'
         Var a -> fromMaybe tm $ ctx a
 
-data Meta a b = M a | N b
-  deriving (Eq, Show)
+data Meta a b = L a | R a | M a | N b
+  deriving Show
+
+instance (Eq a, Eq b) => Eq (Meta a b) where
+  L a == R b = a == b
+  R a == L b = a == b
+
+  L a == L b = a == b
+  R a == R b = a == b
+  N a == N b = a == b
+  M a == M b = a == b
+
+  _ == _ = False
+
+instance (Ord a, Ord b) => Ord (Meta a b) where
+  L{} `compare` M{} = LT
+  R{} `compare` M{} = LT
+  M a `compare` M b = a `compare` b
+  N{} `compare` M{} = GT
+
+  L{} `compare` N{} = LT
+  R{} `compare` N{} = LT
+  M{} `compare` N{} = LT
+  N a `compare` N b = a `compare` b
+
+  R a `compare` L b = a `compare` b
+  L a `compare` L b = a `compare` b
+  M{} `compare` L{} = GT
+  N{} `compare` L{} = GT
+
+  L a `compare` R b = a `compare` b
+  R a `compare` R b = a `compare` b
+  M{} `compare` R{} = GT
+  N{} `compare` R{} = GT
 
 metaVar :: Meta a (Var b c) -> Var b (Meta a c)
 metaVar (M a) = F (M a)
+metaVar (L a) = F (L a)
+metaVar (R a) = F (R a)
 metaVar (N (B a)) = B a
 metaVar (N (F a)) = F (N a)
 
 instance Functor (Meta a) where
   fmap _ (M a) = M a
+  fmap _ (L a) = L a
+  fmap _ (R a) = R a
   fmap f (N a) = N (f a)
 
 instance Applicative (Meta a) where
   pure = N
   N f <*> N a = N (f a)
   M a <*> _ = M a
+  L a <*> _ = L a
+  R a <*> _ = R a
   _ <*> M a = M a
+  _ <*> L a = L a
+  _ <*> R a = R a
 
 instance Bifunctor Meta where
   bimap f _ (M a) = M (f a)
+  bimap f _ (L a) = L (f a)
+  bimap f _ (R a) = R (f a)
   bimap _ g (N a) = N (g a)
 
 instance Pretty a => Pretty (Tm a) where
@@ -210,6 +252,8 @@ instance (Pretty a, Pretty b) => Pretty (Meta a b) where
 
 prettyMeta :: (a -> Doc) -> (b -> Doc) -> Meta a b -> Doc
 prettyMeta f _ (M a) = Print.text "?" <> f a
+prettyMeta f _ (L a) = Print.text "<" <> f a
+prettyMeta f _ (R a) = Print.text ">" <> f a
 prettyMeta _ g (N a) = g a
 
 prettyTm :: forall a. (a -> Doc) -> Tm a -> Doc

@@ -21,6 +21,7 @@ library
                      , Unification
                      , Supply
                      , Supply.Class
+                     , Data.Church.Either
   build-depends:       base >=4.11 && <5
                      , bound
                      , dlist
@@ -39,7 +40,7 @@ library
 test-suite pu-tests
   type:                exitcode-stdio-1.0
   main-is:             Main.hs
-  build-depends:       base >=4.11 && <4.12
+  build-depends:       base >=4.11 && <5
                      , bound
                      , lens
                      , deriving-compat

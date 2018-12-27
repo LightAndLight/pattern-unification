@@ -4,7 +4,7 @@
 {-# language ScopedTypeVariables #-}
 module Unification where
 
-import Bound.Scope (Scope(..), fromScope, toScope)
+import Bound.Scope (Scope(..), fromScope, toScope, instantiate1)
 import Bound.Var (Var(..), unvar)
 import Control.Applicative (empty)
 import Control.Monad (guard)
@@ -14,6 +14,7 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Writer.Strict (WriterT(..), runWriterT, tell)
 import Data.Bifunctor (bimap)
 import Data.DList (DList)
+import Data.Foldable (toList)
 import Data.Monoid (Ap(..))
 import Data.Set (Set)
 import Data.Sequence (Seq, ViewL(..))
@@ -56,6 +57,8 @@ occurs a tm =
     Pair b c -> go False False b || go False False c
     Neutral (Var (M _)) cs -> any (go True False) cs
     Neutral (Var (N _)) cs -> any (go False True) cs
+    Neutral (Var (L _)) cs -> any (go False True) cs
+    Neutral (Var (R _)) cs -> any (go False True) cs
     Neutral _ cs -> any (go False False) cs
   where
     isVar Var{} = True
@@ -64,6 +67,8 @@ occurs a tm =
     go :: forall c. (Eq a, Eq c) => Bool -> Bool -> TmM a c -> Bool
     go _ _ (Var (M b)) = a == b
     go _ _ (Var (N _)) = False
+    go _ _ (Var (L _)) = False
+    go _ _ (Var (R _)) = False
     go _ _ Fst{} = False
     go _ _ Snd{} = False
     go inMeta inVar (Lam s) = go inMeta inVar (sequenceA <$> fromScope s)
@@ -78,6 +83,8 @@ occurs a tm =
           else True
       | otherwise = any (go True False) cs
     go _ _ (Neutral (Var (N _)) cs) = any (go False True) cs
+    go _ _ (Neutral (Var (L _)) cs) = any (go False True) cs
+    go _ _ (Neutral (Var (R _)) cs) = any (go False True) cs
     go _ _ (Neutral _ cs) = any (go False False) cs
 
 ex1 :: Bool
@@ -97,10 +104,10 @@ ex2 =
 -- @O(n * log(n))@
 distinctVarsContaining
   :: forall t a b
-   . (Traversable t, Ord b)
+   . (Traversable t, Ord a, Ord b)
   => t (TmM a b)
   -> TmM a b
-  -> Maybe [b]
+  -> Maybe [Meta a b]
 distinctVarsContaining tms tm =
   fmap DList.toList $
   evalState
@@ -115,18 +122,18 @@ distinctVarsContaining tms tm =
         (\a b ->
            case a of
              M{} -> b
-             N a' -> Set.insert a' b)
+             a' -> Set.insert a' b)
         Set.empty
         tm
 
     go
-      :: (MonadState (Set b) m, Ord b)
+      :: (MonadState (Set (Meta a b)) m, Ord b)
       => TmM a b
-      -> m (Maybe (DList b))
+      -> m (Maybe (DList (Meta a b)))
     go (Var a) =
       case a of
         M{} -> pure Nothing
-        N b -> do
+        b -> do
           res <- gets $ Set.member b
           if res
             then pure Nothing
@@ -300,6 +307,52 @@ varSet = Church.maybe Nothing Just . go
         Var (N a) :< xs -> Set.insert a <$> go xs
         _ -> Church.nothing
 
+eta
+  :: MonadSupply a m
+  => TmM a b
+  -> m (Maybe (Solution a b, TmM a b))
+eta (Neutral (Var (M a)) xs) =
+  case Seq.viewl xs of
+    Fst :< _ -> do
+      p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
+      let sol = Solution a p
+      pure $ Just (sol, Neutral p xs)
+    Snd :< _ -> do
+      p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
+      let sol = Solution a p
+      pure $ Just (sol, Neutral p xs)
+    _ -> pure Nothing
+eta _ = pure Nothing
+
+zipMaybe :: [a] -> [b] -> Maybe [(a, b)]
+zipMaybe a b = Church.maybe Nothing Just $ go a b
+  where
+    go [] [] = Church.just []
+    go (_:_) [] = Church.nothing
+    go [] (_:_) = Church.nothing
+    go (x:xs) (y:ys) = ((x, y) :) <$> go xs ys
+
+decompose
+  :: (Eq a, Eq b, MonadSupply a m)
+  => TmM a b
+  -> TmM a b
+  -> m (Result a b)
+decompose (Neutral x xs) (Neutral y ys) =
+  pure $
+  case zipMaybe (toList xs) (toList ys) of
+    Nothing -> Failure
+    Just xys -> Success [] $ (x, y) : xys
+decompose (Pair a a') (Pair b b') = pure $ Success [] [(a, b), (a', b')]
+decompose Fst Fst = pure $ Success [] []
+decompose Snd Snd = pure $ Success [] []
+decompose (Lam s) (Lam s') = do
+  v <- fresh
+  pure $ Success [] [(instantiate1 (Var $ L v) s, instantiate1 (Var $ R v) s')]
+decompose (Var a) (Var b) = pure $ if a == b then Success [] [] else Failure
+decompose (Var (M _)) _ = pure Postpone
+decompose _ (Var (M _)) = pure Postpone
+decompose _ _ = pure Failure
+
 data Result a b
   = Postpone
   | Failure
@@ -307,7 +360,7 @@ data Result a b
   deriving (Eq, Show)
 
 solve
-  :: (Eq a, Ord b, MonadSupply a m)
+  :: (Ord a, Ord b, MonadSupply a m)
   => TmM a b
   -> TmM a b
   -> m (Result a b)
@@ -327,14 +380,14 @@ solve tm1@(Neutral (Var (M a)) xs) y
   | occurs a y = pure Failure
   | Just vars <- distinctVarsContaining xs y =
       pure $
-      Success [Solution a $ foldr (lam . N) y vars] []
+      Success [Solution a $ foldr lam y vars] []
   | Just keep <- varSet xs = do
       res <- prune keep y
       pure $ maybe Postpone (\(tm, sol) -> Success sol [(tm1, tm)]) res
   | otherwise = pure Postpone
 solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
-solve a b =
-  pure $
-  if a == b
-  then Success [] []
-  else Failure
+solve a b = do
+  ma <- eta a
+  case ma of
+    Nothing -> decompose a b
+    Just (sol, a') -> pure $ Success [sol] [(a', b)]

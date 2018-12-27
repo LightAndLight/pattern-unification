@@ -5,199 +5,87 @@ import Prelude hiding (pi)
 
 import Test.Hspec
 
-import Control.Lens.Review ((#))
-import Control.Monad.Except (runExcept)
-import Control.Monad.State (runStateT)
-import Control.Monad.Trans (lift)
-import Data.Functor.Identity (Identity(..))
-
-import Equation
 import LambdaPi
-import Solver
-import Solver.Class
 import Supply
 import Unification
 
-intSeed :: Int
-intSeed = 1
+nameSeed :: Int
+nameSeed = 0
 
-intGen :: Int -> (Int, Int)
-intGen a = (a, a+1)
-
-runEta
-  :: Equation Meta Int
-  -> Either (UnifyError Meta Int) [Equation Meta Int]
-runEta = runExcept . runSupplyT intSeed intGen . eta
-
-runFlexRigid
-  :: MetaContext v
-  -> SupplyT Int Int (SolverT v (SolverError v) Identity) a
-  -> Either (SolverError v) (a, MetaContext v)
-runFlexRigid ctx =
-  runExcept .
-  flip runStateT ctx .
-  unSolverT .
-  runSupplyT intSeed intGen
+nameGen :: Int -> (String, Int)
+nameGen n = ("t" <> show n, n+1)
 
 main :: IO ()
 main = hspec $ do
-  describe "type checker" $ do
-    it "(\\x. y. y) : pi (t : Type). pi (a : t). a" $ do
-      check
-        (const Nothing)
-        (Lam $ lift $ lam "x" $ Var "x")
-        (pi ("t", Type) $ pi ("a", Var "t") $ Var "a") `shouldBe`
-        True
-  describe "flex-rigid" $ do
-    it "flex-rigid test 1" $ do
-      let
-        a :: Int
-        a = 0
-
-        t :: Tm (Meta Int)
-        t = Var $ _V # 1
-
-        x = 2
-
-        p :: Problem Int
-        p =
-          Problem [] $
-          Equation
-            -- x : t
-            [(x, Only t)]
-            -- a x : t
-            (Neutral (Var $ _M # a) [Var (_V # x)]) t
-            -- x : t
-            (Var $ _V # x) t
-
-
-        expectedMC =
-          MetaContext
-            [MetaDecl a $ pi (_V # 3, t) t]
-            Nothing
-            []
-            -- a = \x. x
-            [(a, lam (_V # 0) (Var $ _V # 0))]
-
-      runFlexRigid
-        (MetaContext
-           -- a : (c : t) -> t
-           [MetaDecl a $ pi (_V # 3, t) t]
-           (Just $ p)
-           []
-           [])
-        flexRigid
-        `shouldBe` Right ((), expectedMC)
-    it "flex-rigid test 2" $ do
-      let
-        a :: Int
-        a = 0
-
-        t :: Tm (Meta Int)
-        t = Var $ _V # 1
-
-        t' :: Tm (Meta Int)
-        t' = Var $ _V # 2
-
-        x = 3
-        y = 4
-
-        p :: Problem Int
-        p =
-          Problem [] $
-          Equation
-            -- x : t
-            [(x, Only t)]
-            -- a x y : t
-            (Neutral (Var $ _M # a) [Var (_V # x), Var (_V # y)]) t
-            -- x : t
-            (Var $ _V # x) t
-
-
-        expectedMC =
-          MetaContext
-            -- a : (c : t) -> (d : t') -> t
-            [MetaDecl a $ pi (_V # 5, t) $ pi (_V # 6, t') $ t]
-            Nothing
-            []
-            -- a = \x y. x
-            [(a, lam (_V # 0) $ lam (_V # 1) (Var $ _V # 0))]
-
-      runFlexRigid
-        (MetaContext
-           -- a : (c : t) -> (d : t') -> t
-           [MetaDecl a $ pi (_V # 5, t) $ pi (_V # 6, t') t]
-           (Just $ p)
-           []
-           [])
-        flexRigid
-        `shouldBe` Right ((), expectedMC)
-  describe "eta expansion" $ do
-    it "eta test 1" $ do
-      let
-        s1 = sigma (_V # 0, Type) Type
-        ctx = [(0, Only s1)]
-      runEta
-        (Equation ctx
-           (apply Fst (Var $ _V # 0)) Type
-           (apply Fst (Var $ _V # 0)) Type)
+  describe "solver tests" $ do
+    it "α x =?= x   -   α := λ. 0" $ do
+      runSupply nameSeed nameGen (solve (Var (M "alpha") .@ Var (N "x")) (Var (N "x")))
         `shouldBe`
-        Right [Equation ctx s1 Type s1 Type]
-    it "eta test 2" $ do
-      let
-        x = Var $ _V # 0
-
-        a = _V # 1
-        ta = Var $ _V # 2
-        b = Var $ _V # 3
-        c = _V # 4
-        td = Var $ _V # 5
-        p1 = pi (a, ta) $ pi (c, apply (Var a) b) td
-
-        ctx = [(0, Only p1)]
-
-        y1 = Var $ _V # 6
-        y2 = Var $ _V # 7
-
-        z1 = Var $ _V # 8
-        z2 = Var $ _V # 9
-
-      runEta
-        (Equation ctx
-           (apply z1 $ apply y1 x) Type
-           (apply z2 $ apply y2 x) Type)
+        Success [Solution "alpha" $ lam (N "x") (Var $ N "x")] []
+    it "α x y =?= x   -   α := λ. λ. 1" $ do
+      runSupply nameSeed nameGen (solve (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (N "x")))
         `shouldBe`
-        Right
-          [ Equation ctx p1 Type p1 Type
-          , Equation ctx y1 ta y2 ta
-          , Equation ctx z1 (apply y1 b) z2 (apply y2 b)
+        Success [Solution "alpha" $ lam (N "x") $ lam (N "y") $ (Var $ N "x")] []
+    it "α x y =?= y   -   α := λ. λ. 0" $ do
+      runSupply nameSeed nameGen (solve (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (N "y")))
+        `shouldBe`
+        Success [Solution "alpha" $ lam (N "x") $ lam (N "y") $ (Var $ N "y")] []
+    it "α x y =?= α y   -   fails" $ do
+      runSupply nameSeed nameGen (solve (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (M "alpha") .@ Var (N "y")))
+        `shouldBe`
+        Failure
+    it "α x y =?= α x z   -   α := λ. λ. β 1   ,   β x =?= β x" $ do
+      runSupply nameSeed nameGen (solve (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (M "alpha") .@ Var (N "x") .@ Var (N "z")))
+        `shouldBe`
+        Success
+          [ Solution "alpha" $
+            lam (N "x") $ lam (N "_") $ Var (M "t0") .@ Var (N "x")
           ]
-    it "eta test 3" $ do
-      let
-        x = Var $ _V # 0
-
-        a = _V # 1
-        ta = Var $ _V # 2
-        b = Var $ _V # 3
-        c = _V # 4
-        td = Var $ _V # 5
-        p1 = pi (a, ta) $ pi (c, apply (Var a) b) td
-
-        ctx = [(0, Only p1)]
-
-        y1 = Var $ _V # 6
-        y2 = Var $ _V # 7
-
-        z1 = Var $ _V # 8
-        z2 = Var $ _V # 9
-
-      runEta
-        (Equation ctx
-           (apply z1 $ apply y1 x) Type
-           (apply z2 $ apply y2 x) Type)
+          [(Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
+    it "α x x =?= α y x   -   α := λ. λ. β 0   ,   β x =?= β x" $ do
+      runSupply nameSeed nameGen
+        (solve
+           (Var (M "alpha") .@ Var (N "x") .@ Var (N "x"))
+           (Var (M "alpha") .@ Var (N "y") .@ Var (N "x")))
         `shouldBe`
-        Right
-          [ Equation ctx p1 Type p1 Type
-          , Equation ctx y1 ta y2 ta
-          , Equation ctx z1 (apply y1 b) z2 (apply y2 b)
+        Success
+          [ Solution "alpha" $
+            lam (N "y") $ lam (N "x") $ Var (M "t0") .@ Var (N "x")
           ]
+          [(Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
+    it "α x =?= x (β y)   -   β := λ. γ   ,   α x =?= x γ" $ do
+      runSupply nameSeed nameGen
+        (solve
+           (Var (M "alpha") .@ Var (N "x"))
+           (Var (N "x") .@ (Var (M "beta") .@ Var (N "y"))))
+        `shouldBe`
+        Success
+          [Solution "beta" $ lam (N "y") $ Var (M "t0")]
+          [(Var (M "alpha") .@ Var (N "x"), Var (N "x") .@ Var (M "t0"))]
+    it "α x =?= x γ   -   α := λ. 0 γ" $ do
+      runSupply nameSeed nameGen
+        (solve
+           (Var (M "alpha") .@ Var (N "x"))
+           (Var (N "x") .@ Var (M "gamma")))
+        `shouldBe`
+        Success
+          [Solution "alpha" $ lam (N "x") $ Var (N "x") .@ Var (M "gamma")]
+          []
+    it "λ. 0 =?= λ. α 0   -   <x =?= α >x" $ do
+      runSupply nameSeed nameGen
+        (solve
+           (lam (N "x") $ Var (N "x"))
+           (lam (N "x") $ Var (M "alpha") .@ Var (N "x")))
+        `shouldBe`
+        Success
+          []
+          [(Var $ L "t0", Var (M "alpha") .@ Var (R "t0"))]
+    it "<x =?= α >x   -   α := λ. 0" $ do
+      runSupply nameSeed nameGen
+        (solve
+           (Var $ L "t0")
+           (Var (M "alpha") .@ Var (R "t0")))
+        `shouldBe`
+        Success
+          [Solution "alpha" $ lam (N "x") (Var $ N "x")]
+          []
