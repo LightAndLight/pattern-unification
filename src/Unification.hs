@@ -20,6 +20,7 @@ import Data.Sequence (Seq, ViewL(..))
 import Data.Void (Void, absurd)
 import Text.PrettyPrint.ANSI.Leijen (Doc, Pretty(..))
 
+import qualified Data.Church.Either as Church
 import qualified Data.Church.Maybe as Church
 import qualified Data.DList as DList
 import qualified Data.Set as Set
@@ -132,6 +133,10 @@ distinctVarsContaining tms tm =
             else Just (DList.singleton b) <$ modify (Set.insert b)
     go _ = pure Nothing
 
+data IntersectFailure
+  = DifferentArities
+  | NotAllVars
+
 -- | Compute a term that solves a flex-flex equation by intersection
 --
 -- @O(n^2)@
@@ -140,20 +145,22 @@ intersect
    . (Eq a, Eq b)
   => Seq (TmM a b)
   -> Seq (TmM a b)
-  -> Maybe (a -> TmM a b, a -> TmM a b)
+  -> Either IntersectFailure (a -> TmM a b, a -> TmM a b)
 intersect l m =
   -- use a church-encoded maybe for proper tail recursion
-  Church.maybe Nothing Just $
+  Church.either Left Right $
   bimap (\f -> f . Var . M) (\f -> f . Var . M) <$> go l m
   where
     go
       :: forall c
        . Seq (Tm (Meta a b))
       -> Seq (Tm (Meta a b))
-      -> Church.Maybe (Tm c -> Tm c, Tm (Meta a b) -> Tm (Meta a b))
+      -> Church.Either
+           IntersectFailure
+           (Tm c -> Tm c, Tm (Meta a b) -> Tm (Meta a b))
     go a b =
       case (Seq.viewl a, Seq.viewl b) of
-        (EmptyL, EmptyL) -> Church.just (id, id)
+        (EmptyL, EmptyL) -> Church.right (id, id)
         (Var (N x) :< xs, Var (N y) :< ys) ->
           if x == y
 
@@ -172,12 +179,13 @@ intersect l m =
               (\f -> Lam . lift . f)
               id <$>
             go xs ys
-        _ -> Church.nothing
+        (_ :< xs, _ :< ys) -> Church.left NotAllVars *> go xs ys
+        _ -> Church.left DifferentArities
 
 ex3 :: (TmM String String, TmM String String)
 ex3 = (res "alpha", res' "alpha")
   where
-    Just (res, res') =
+    Right (res, res') =
       intersect
         [Var (N "x"), Var (N "x")]
         [Var (N "x"), Var (N "y")]
@@ -185,7 +193,7 @@ ex3 = (res "alpha", res' "alpha")
 ex4 :: (TmM String String, TmM String String)
 ex4 = (res "alpha", res' "alpha")
   where
-    Just (res, res') =
+    Right (res, res') =
       intersect
         [Var (N "x"), Var (N "x"), Var (N "x")]
         [Var (N "x"), Var (N "y"), Var (N "z")]
@@ -193,7 +201,7 @@ ex4 = (res "alpha", res' "alpha")
 ex5 :: (TmM String String, TmM String String)
 ex5 = (res "alpha", res' "alpha")
   where
-    Just (res, res') =
+    Right (res, res') =
       intersect
         [Var (N "x"), Var (N "y"), Var (N "x")]
         [Var (N "x"), Var (N "y"), Var (N "z")]
@@ -201,7 +209,7 @@ ex5 = (res "alpha", res' "alpha")
 ex6 :: (TmM String String, TmM String String)
 ex6 = (res "alpha", res' "alpha")
   where
-    Just (res, res') =
+    Right (res, res') =
       intersect
         [Var (N "x"), Var (N "y"), Var (N "x")]
         [Var (N "y"), Var (N "y"), Var (N "z")]
@@ -295,34 +303,38 @@ varSet = Church.maybe Nothing Just . go
 data Result a b
   = Postpone
   | Failure
-  | Success [Solution a b] (Maybe (TmM a b))
+  | Success [Solution a b] [(TmM a b, TmM a b)]
+  deriving (Eq, Show)
 
 solve
   :: (Eq a, Ord b, MonadSupply a m)
   => TmM a b
   -> TmM a b
   -> m (Result a b)
-solve (Neutral (Var (M a)) xs) tm@(Neutral (Var (M b)) ys)
-  | a == b
-  , Just (sol, tm') <- intersect xs ys = do
-      mv <- fresh
-      pure $ Success [Solution a $ sol mv] (Just $ tm' mv)
+solve tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
+  | a == b =
+    case intersect xs ys of
+      Left DifferentArities -> pure Failure
+      Left NotAllVars -> pure Postpone
+      Right (sol, tm') -> do
+        mv <- fresh
+        pure $ Success [Solution a $ sol mv] [(tm' mv, tm' mv)]
   | Just keep <- varSet xs = do
-      res <- prune keep tm
-      pure $ maybe Postpone (\(tm', sol) -> Success sol $ Just tm') res
+      res <- prune keep tm2
+      pure $ maybe Postpone (\(tm', sol) -> Success sol [(tm1, tm')]) res
   | otherwise = pure Postpone
-solve (Neutral (Var (M a)) xs) y
+solve tm1@(Neutral (Var (M a)) xs) y
   | occurs a y = pure Failure
   | Just vars <- distinctVarsContaining xs y =
       pure $
-      Success [Solution a $ foldr (lam . N) y vars] Nothing
+      Success [Solution a $ foldr (lam . N) y vars] []
   | Just keep <- varSet xs = do
       res <- prune keep y
-      pure $ maybe Postpone (\(tm, sol) -> Success sol $ Just tm) res
+      pure $ maybe Postpone (\(tm, sol) -> Success sol [(tm1, tm)]) res
   | otherwise = pure Postpone
 solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
 solve a b =
   pure $
   if a == b
-  then Success [] Nothing
+  then Success [] []
   else Failure
