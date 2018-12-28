@@ -7,7 +7,6 @@
 {-# language OverloadedLists #-}
 {-# language StandaloneDeriving, TemplateHaskell #-}
 {-# language RankNTypes, ScopedTypeVariables #-}
-{-# language QuantifiedConstraints #-}
 module LambdaPi where
 
 import Prelude hiding (pi)
@@ -181,18 +180,14 @@ eval ctx = go
             foldl elim (go a) bs'
         Var a -> fromMaybe tm $ ctx a
 
-data Meta f a b
-  = M (f a)
+data Meta a b c
+  = M a
   | L b
   | R b
-  | N b
+  | N c
   deriving Show
 
-instance
-  ( forall x. Eq x => Eq (f x)
-  , Eq a
-  , Eq b
-  ) => Eq (Meta f a b) where
+instance (Eq a, Eq b, Eq c) => Eq (Meta a b c) where
   L a == R b = a == b
   R a == L b = a == b
 
@@ -203,13 +198,7 @@ instance
 
   _ == _ = False
 
-instance
-  ( forall x. Eq x => Eq (f x)
-  , forall x. Ord x => Ord (f x)
-  , Ord a
-  , Ord b
-  ) => Ord (Meta f a b) where
-
+instance (Ord a, Ord b, Ord c) => Ord (Meta a b c) where
   L{} `compare` M{} = LT
   R{} `compare` M{} = LT
   M a `compare` M b = a `compare` b
@@ -230,108 +219,46 @@ instance
   M{} `compare` R{} = GT
   N{} `compare` R{} = GT
 
-metaVar :: Meta f a (Var b c) -> Var b (Meta f a c)
+metaVar :: Meta a b (Var c d) -> Var c (Meta a b d)
 metaVar (M a) = F (M a)
-metaVar (L (B a)) = B a
-metaVar (L (F a)) = F (L a)
-metaVar (R (B a)) = B a
-metaVar (R (F a)) = F (R a)
+metaVar (L a) = F (L a)
+metaVar (R a) = F (R a)
 metaVar (N (B a)) = B a
 metaVar (N (F a)) = F (N a)
 
-instance Functor (Meta f a) where
+instance Functor (Meta a b) where
   fmap _ (M a) = M a
-  fmap f (L a) = L (f a)
-  fmap f (R a) = R (f a)
+  fmap _ (L a) = L a
+  fmap _ (R a) = R a
   fmap f (N a) = N (f a)
 
--- | Laws:
---
--- (pure id <*> v) = v follows trivially
---
--- pure (.) <*> u <*> v <*> w = u <*> (v <*> w)
---
--- for: u = N f
---
--- pure (.) <*> N f <*> v <*> w = N f <*> (v <*> w)
--- N ((.) f) <*> v <*> w = N f <*> (v <*> w)
---
--- for: u = N f, v = N g
---
--- N ((.) f) <*> N g <*> w = N f <*> (N g <*> w)
--- N ((.) f g) <*> w = N f <*> (N g <*> w)
---
--- for: u = N f, v = N g, w = N x
---
--- N ((.) f g) <*> N x = N f <*> (N g <*> N x)
--- N ((.) f g x) = N f <*> (N g <*> N x)
--- N ((.) f g x) = N f <*> N (g x)
--- N ((.) f g x) = N (f (g x))
---
--- for: u = N f, v = N g, w = L x
---
--- N ((.) f g) <*> L x = N f <*> (N g <*> L x)
--- L ((.) f g x) = N f <*> L (g x)
--- L ((.) f g x) = L (f (g x))
---
--- for: u = N f, v = N g, w = R x
---
--- N ((.) f g) <*> R x = N f <*> (N g <*> R x)
--- R ((.) f g x) = N f <*> R (g x)
--- R ((.) f g x) = R (f (g x))
---
--- for: u = N f, v = N g, w = M a
---
--- N ((.) f g) <*> M a = N f <*> (N g <*> M a)
--- M a = N f <*> (N g <*> M a)
--- M a = N f <*> M a
--- M a = M a
-instance Applicative (Meta f a) where
+instance Applicative (Meta a b) where
   pure = N
-
   N f <*> N a = N (f a)
-  L f <*> N a = N (f a)
-  R f <*> N a = N (f a)
-
-  N f <*> L a = L (f a)
-  L f <*> L a = L (f a)
-  R f <*> L a = L (f a)
-
-  N f <*> R a = R (f a)
-  L f <*> R a = R (f a)
-  R f <*> R a = R (f a)
-
   M a <*> _ = M a
+  L a <*> _ = L a
+  R a <*> _ = R a
   _ <*> M a = M a
+  _ <*> L a = L a
+  _ <*> R a = R a
 
-instance Functor f => Bifunctor (Meta f) where
-  bimap f _ (M a) = M (fmap f a)
-  bimap _ g (L a) = L (g a)
-  bimap _ g (R a) = R (g a)
+instance Bifunctor (Meta a) where
+  bimap _ _ (M a) = M a
+  bimap f _ (L a) = L (f a)
+  bimap f _ (R a) = R (f a)
   bimap _ g (N a) = N (g a)
 
 instance Pretty a => Pretty (Tm a) where
   pretty = prettyTm pretty
 
-instance
-  ( forall x. Pretty x => Pretty (f x)
-  , Pretty a
-  , Pretty b
-  ) => Pretty (Meta f a b) where
-  pretty (M a) = Print.text "?" <> pretty a
-  pretty (L a) = Print.text "<" <> pretty a
-  pretty (R a) = Print.text ">" <> pretty a
-  pretty (N a) = pretty a
+instance (Pretty a, Pretty b, Pretty c) => Pretty (Meta a b c) where
+  pretty = prettyMeta pretty pretty pretty
 
-prettyMeta
-  :: (forall x. (x -> Doc) -> f x -> Doc)
-  -> (a -> Doc)
-  -> (b -> Doc)
-  -> Meta f a b -> Doc
-prettyMeta f x _ (M a) = Print.text "?" <> f x a
-prettyMeta _ _ g (L a) = Print.text "<" <> g a
-prettyMeta _ _ g (R a) = Print.text ">" <> g a
-prettyMeta _ _ g (N a) = g a
+prettyMeta :: (a -> Doc) -> (b -> Doc) -> (c -> Doc) -> Meta a b c -> Doc
+prettyMeta f _ _ (M a) = Print.text "?" <> f a
+prettyMeta _ g _ (L a) = Print.text "<" <> g a
+prettyMeta _ g _ (R a) = Print.text ">" <> g a
+prettyMeta _ _ h (N a) = h a
 
 prettyTm :: forall a. (a -> Doc) -> Tm a -> Doc
 prettyTm aDoc = go Right

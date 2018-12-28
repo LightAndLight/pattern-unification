@@ -1,10 +1,7 @@
 {-# language FlexibleContexts #-}
 {-# language LambdaCase #-}
 {-# language OverloadedLists #-}
-{-# language RankNTypes #-}
 {-# language ScopedTypeVariables #-}
-{-# language StandaloneDeriving #-}
-{-# language QuantifiedConstraints #-}
 module Unification where
 
 import Bound.Scope (Scope(..), fromScope, toScope, instantiate1)
@@ -18,11 +15,9 @@ import Control.Monad.Writer.Strict (WriterT(..), runWriterT, tell)
 import Data.Bifunctor (bimap)
 import Data.DList (DList)
 import Data.Foldable (toList)
-import Data.Functor.Identity (Identity(..))
 import Data.Monoid (Ap(..))
 import Data.Set (Set)
 import Data.Sequence (Seq, ViewL(..))
-import Data.STRef (STRef)
 import Data.Void (Void, absurd)
 import Text.PrettyPrint.ANSI.Leijen (Doc, Pretty(..))
 
@@ -36,46 +31,23 @@ import qualified Text.PrettyPrint.ANSI.Leijen as Print
 import LambdaPi
 import Supply.Class
 
-type TmM f a b = Tm (Meta f a b)
+type TmM a b = Tm (Meta a a b)
 
-data Solution f a b = Solution (f a) (TmM f a b)
-deriving instance
-  (forall x. Eq x => Eq (f x), Eq a, Eq b) => Eq (Solution f a b)
-deriving instance
-  (forall x. Show x => Show (f x), Show a, Show b) => Show (Solution f a b)
+data Solution a b = Solution a (TmM a b)
+  deriving (Eq, Show)
 
-prettySolution
-  :: (forall x. (x -> Doc) -> f x -> Doc)
-  -> (a -> Doc)
-  -> (b -> Doc)
-  -> Solution f a b
-  -> Doc
-prettySolution fDoc aDoc bDoc (Solution a b) =
+prettySolution :: (a -> Doc) -> (b -> Doc) -> Solution a b -> Doc
+prettySolution aDoc bDoc (Solution a b) =
   Print.hsep
-    [ Print.char '?' <> fDoc aDoc a
+    [ Print.char '?' <> aDoc a
     , Print.text ":="
-    , prettyTm (prettyMeta fDoc aDoc bDoc) b
+    , prettyTm (prettyMeta aDoc aDoc bDoc) b
     ]
 
-instance
-  ( forall x. Pretty x => Pretty (f x)
-  , Pretty a
-  , Pretty b
-  ) => Pretty (Solution f a b) where
+instance (Pretty a, Pretty b) => Pretty (Solution a b) where
+  pretty = prettySolution pretty pretty
 
-  pretty (Solution a b) =
-    Print.hsep
-      [ Print.char '?' <> pretty a
-      , Print.text ":="
-      , pretty b
-      ]
-
-occurs
-  :: forall a b f
-   . (forall x. Eq x => Eq (f x), Eq a, Eq b)
-  => f a
-  -> TmM f a b
-  -> Bool
+occurs :: forall a b. (Eq a, Eq b) => a -> TmM a b -> Bool
 occurs a tm =
   case tm of
     Var{} -> go False False tm
@@ -92,7 +64,7 @@ occurs a tm =
     isVar Var{} = True
     isVar _ = False
 
-    go :: forall c. (Eq a, Eq c) => Bool -> Bool -> TmM f a c -> Bool
+    go :: forall c. (Eq a, Eq c) => Bool -> Bool -> TmM a c -> Bool
     go _ _ (Var (M b)) = a == b
     go _ _ (Var (N _)) = False
     go _ _ (Var (L _)) = False
@@ -131,16 +103,11 @@ ex2 =
 --
 -- @O(n * log(n))@
 distinctVarsContaining
-  :: forall t a b f
-   . ( Traversable t
-     , forall x. Eq x => Eq (f x)
-     , forall x. Ord x => Ord (f x)
-     , Ord a
-     , Ord b
-     )
-  => t (TmM f a b)
-  -> TmM f a b
-  -> Maybe [Meta f a b]
+  :: forall t a b
+   . (Traversable t, Ord a, Ord b)
+  => t (TmM a b)
+  -> TmM a b
+  -> Maybe [Meta a a b]
 distinctVarsContaining tms tm =
   fmap DList.toList $
   evalState
@@ -160,9 +127,9 @@ distinctVarsContaining tms tm =
         tm
 
     go
-      :: (MonadState (Set (Meta f a b)) m, Ord b)
-      => TmM f a b
-      -> m (Maybe (DList (Meta f a b)))
+      :: (MonadState (Set (Meta a a b)) m, Ord b)
+      => TmM a b
+      -> m (Maybe (DList (Meta a a b)))
     go (Var a) =
       case a of
         M{} -> pure Nothing
@@ -181,11 +148,11 @@ data IntersectFailure
 --
 -- @O(n^2)@
 intersect
-  :: forall a b f
+  :: forall a b
    . (Eq a, Eq b)
-  => Seq (TmM f a b)
-  -> Seq (TmM f a b)
-  -> Either IntersectFailure (f a -> TmM f a b, f a -> TmM f a b)
+  => Seq (TmM a b)
+  -> Seq (TmM a b)
+  -> Either IntersectFailure (a -> TmM a b, a -> TmM a b)
 intersect l m =
   -- use a church-encoded maybe for proper tail recursion
   Church.either Left Right $
@@ -193,11 +160,11 @@ intersect l m =
   where
     go
       :: forall c
-       . Seq (TmM f a b)
-      -> Seq (TmM f a b)
+       . Seq (TmM a b)
+      -> Seq (TmM a b)
       -> Church.Either
            IntersectFailure
-           (Tm c -> Tm c, TmM f a b -> TmM f a b)
+           (Tm c -> Tm c, TmM a b -> TmM a b)
     go a b =
       case (Seq.viewl a, Seq.viewl b) of
         (EmptyL, EmptyL) -> Church.right (id, id)
@@ -222,32 +189,32 @@ intersect l m =
         (_ :< xs, _ :< ys) -> Church.left NotAllVars *> go xs ys
         _ -> Church.left DifferentArities
 
-ex3 :: (TmM Identity String String, TmM Identity String String)
-ex3 = (res $ Identity "alpha", res' $ Identity "alpha")
+ex3 :: (TmM String String, TmM String String)
+ex3 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
         [Var (N "x"), Var (N "x")]
         [Var (N "x"), Var (N "y")]
 
-ex4 :: (TmM Identity String String, TmM Identity String String)
-ex4 = (res $ Identity "alpha", res' $ Identity "alpha")
+ex4 :: (TmM String String, TmM String String)
+ex4 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
         [Var (N "x"), Var (N "x"), Var (N "x")]
         [Var (N "x"), Var (N "y"), Var (N "z")]
 
-ex5 :: (TmM Identity String String, TmM Identity String String)
-ex5 = (res $ Identity "alpha", res' $ Identity "alpha")
+ex5 :: (TmM String String, TmM String String)
+ex5 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
         [Var (N "x"), Var (N "y"), Var (N "x")]
         [Var (N "x"), Var (N "y"), Var (N "z")]
 
-ex6 :: (TmM Identity String String, TmM Identity String String)
-ex6 = (res $ Identity "alpha", res' $ Identity "alpha")
+ex6 :: (TmM String String, TmM String String)
+ex6 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
@@ -255,10 +222,10 @@ ex6 = (res $ Identity "alpha", res' $ Identity "alpha")
         [Var (N "y"), Var (N "y"), Var (N "z")]
 
 pruneArgs
-  :: forall a b f
+  :: forall a b
     . (b -> Maybe b)
-  -> Seq (TmM f a b)
-  -> Maybe (f a -> TmM f a Void, f a -> TmM f a b)
+  -> Seq (TmM a b)
+  -> Maybe (a -> TmM a Void, a -> TmM a b)
 pruneArgs ctx =
   Church.maybe Nothing Just .
   fmap (bimap (. (Var . M)) (. (Var . M))) .
@@ -266,8 +233,8 @@ pruneArgs ctx =
   where
     go
       :: forall c
-       . Seq (TmM f a b)
-      -> Church.Maybe (Tm c -> Tm c, TmM f a b -> TmM f a b)
+       . Seq (TmM a b)
+      -> Church.Maybe (Tm c -> Tm c, TmM a b -> TmM a b)
     go a =
       case Seq.viewl a of
         EmptyL -> Church.just (id, id)
@@ -288,11 +255,11 @@ pruneArgs ctx =
             _ -> Church.nothing
 
 prune
-  :: forall a b m f
-   . (Ord b, MonadSupply (f a) m)
+  :: forall a b m
+   . (Ord b, MonadSupply a m)
   => Set b
-  -> TmM f a b
-  -> m (Maybe (TmM f a b, [Solution f a b]))
+  -> TmM a b
+  -> m (Maybe (TmM a b, [Solution a b]))
 prune keep =
   runMaybeT .
   runWriterT .
@@ -302,8 +269,8 @@ prune keep =
       :: forall c
        . Bool
       -> (c -> Maybe c)
-      -> TmM f a c
-      -> WriterT [Solution f a b] (MaybeT m) (TmM f a c)
+      -> TmM a c
+      -> WriterT [Solution a b] (MaybeT m) (TmM a c)
     go _ _ (Var v) = pure $ Var v
     go underMeta ctx (Lam s) = do
       s' <-
@@ -331,7 +298,7 @@ prune keep =
       xs' <- traverse (go underMeta ctx) xs
       pure $ Neutral a xs'
 
-varSet :: Ord b => Seq (TmM f a b) -> Maybe (Set b)
+varSet :: Ord b => Seq (TmM a b) -> Maybe (Set b)
 varSet = Church.maybe Nothing Just . go
   where
     go x =
@@ -341,9 +308,9 @@ varSet = Church.maybe Nothing Just . go
         _ -> Church.nothing
 
 eta
-  :: MonadSupply (f a) m
-  => TmM f a b
-  -> m (Maybe (Solution f a b, TmM f a b))
+  :: MonadSupply a m
+  => TmM a b
+  -> m (Maybe (Solution a b, TmM a b))
 eta (Neutral (Var (M a)) xs) =
   case Seq.viewl xs of
     Fst :< _ -> do
@@ -366,10 +333,10 @@ zipMaybe a b = Church.maybe Nothing Just $ go a b
     go (x:xs) (y:ys) = ((x, y) :) <$> go xs ys
 
 decompose
-  :: (forall x. Eq x => Eq (f x), Eq a, Eq b, MonadSupply (f a) m)
-  => TmM f a b
-  -> TmM f a b
-  -> m (Result f a b)
+  :: (Eq a, Eq b, MonadSupply a m)
+  => TmM a b
+  -> TmM a b
+  -> m (Result a b)
 decompose (Neutral x xs) (Neutral y ys) =
   pure $
   case zipMaybe (toList xs) (toList ys) of
@@ -387,25 +354,17 @@ decompose (Var (M _)) _ = pure Postpone
 decompose _ (Var (M _)) = pure Postpone
 decompose _ _ = pure Failure
 
-data Result f a b
+data Result a b
   = Postpone
   | Failure
-  | Success [Solution f a b] [(TmM f a b, TmM f a b)]
-deriving instance
-  (forall x. Eq x => Eq (f x), Eq a, Eq b) => Eq (Result f a b)
-deriving instance
-  (forall x. Show x => Show (f x), Show a, Show b) => Show (Result f a b)
+  | Success [Solution a b] [(TmM a b, TmM a b)]
+  deriving (Eq, Show)
 
 solve1
-  :: ( forall x. Eq x => Eq (f x)
-     , forall x. Ord x => Ord (f x)
-     , Ord a
-     , Ord b
-     , MonadSupply (f a) m
-     )
-  => TmM f a b
-  -> TmM f a b
-  -> m (Result f a b)
+  :: (Ord a, Ord b, MonadSupply a m)
+  => TmM a b
+  -> TmM a b
+  -> m (Result a b)
 solve1 tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
   | a == b =
     case intersect xs ys of
