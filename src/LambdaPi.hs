@@ -180,10 +180,14 @@ eval ctx = go
             foldl elim (go a) bs'
         Var a -> fromMaybe tm $ ctx a
 
-data Meta a b = L a | R a | M a | N b
+data Meta a b c
+  = M a
+  | L b
+  | R b
+  | N c
   deriving Show
 
-instance (Eq a, Eq b) => Eq (Meta a b) where
+instance (Eq a, Eq b, Eq c) => Eq (Meta a b c) where
   L a == R b = a == b
   R a == L b = a == b
 
@@ -194,7 +198,7 @@ instance (Eq a, Eq b) => Eq (Meta a b) where
 
   _ == _ = False
 
-instance (Ord a, Ord b) => Ord (Meta a b) where
+instance (Ord a, Ord b, Ord c) => Ord (Meta a b c) where
   L{} `compare` M{} = LT
   R{} `compare` M{} = LT
   M a `compare` M b = a `compare` b
@@ -215,20 +219,20 @@ instance (Ord a, Ord b) => Ord (Meta a b) where
   M{} `compare` R{} = GT
   N{} `compare` R{} = GT
 
-metaVar :: Meta a (Var b c) -> Var b (Meta a c)
+metaVar :: Meta a b (Var c d) -> Var c (Meta a b d)
 metaVar (M a) = F (M a)
 metaVar (L a) = F (L a)
 metaVar (R a) = F (R a)
 metaVar (N (B a)) = B a
 metaVar (N (F a)) = F (N a)
 
-instance Functor (Meta a) where
+instance Functor (Meta a b) where
   fmap _ (M a) = M a
   fmap _ (L a) = L a
   fmap _ (R a) = R a
   fmap f (N a) = N (f a)
 
-instance Applicative (Meta a) where
+instance Applicative (Meta a b) where
   pure = N
   N f <*> N a = N (f a)
   M a <*> _ = M a
@@ -238,8 +242,8 @@ instance Applicative (Meta a) where
   _ <*> L a = L a
   _ <*> R a = R a
 
-instance Bifunctor Meta where
-  bimap f _ (M a) = M (f a)
+instance Bifunctor (Meta a) where
+  bimap _ _ (M a) = M a
   bimap f _ (L a) = L (f a)
   bimap f _ (R a) = R (f a)
   bimap _ g (N a) = N (g a)
@@ -247,14 +251,14 @@ instance Bifunctor Meta where
 instance Pretty a => Pretty (Tm a) where
   pretty = prettyTm pretty
 
-instance (Pretty a, Pretty b) => Pretty (Meta a b) where
-  pretty = prettyMeta pretty pretty
+instance (Pretty a, Pretty b, Pretty c) => Pretty (Meta a b c) where
+  pretty = prettyMeta pretty pretty pretty
 
-prettyMeta :: (a -> Doc) -> (b -> Doc) -> Meta a b -> Doc
-prettyMeta f _ (M a) = Print.text "?" <> f a
-prettyMeta f _ (L a) = Print.text "<" <> f a
-prettyMeta f _ (R a) = Print.text ">" <> f a
-prettyMeta _ g (N a) = g a
+prettyMeta :: (a -> Doc) -> (b -> Doc) -> (c -> Doc) -> Meta a b c -> Doc
+prettyMeta f _ _ (M a) = Print.text "?" <> f a
+prettyMeta _ g _ (L a) = Print.text "<" <> g a
+prettyMeta _ g _ (R a) = Print.text ">" <> g a
+prettyMeta _ _ h (N a) = h a
 
 prettyTm :: forall a. (a -> Doc) -> Tm a -> Doc
 prettyTm aDoc = go Right

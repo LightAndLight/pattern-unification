@@ -31,7 +31,9 @@ import qualified Text.PrettyPrint.ANSI.Leijen as Print
 import LambdaPi
 import Supply.Class
 
-data Solution a b = Solution a (Tm (Meta a b))
+type TmM a b = Tm (Meta a a b)
+
+data Solution a b = Solution a (TmM a b)
   deriving (Eq, Show)
 
 prettySolution :: (a -> Doc) -> (b -> Doc) -> Solution a b -> Doc
@@ -39,13 +41,11 @@ prettySolution aDoc bDoc (Solution a b) =
   Print.hsep
     [ Print.char '?' <> aDoc a
     , Print.text ":="
-    , prettyTm (prettyMeta aDoc bDoc) b
+    , prettyTm (prettyMeta aDoc aDoc bDoc) b
     ]
 
 instance (Pretty a, Pretty b) => Pretty (Solution a b) where
   pretty = prettySolution pretty pretty
-
-type TmM a b = Tm (Meta a b)
 
 occurs :: forall a b. (Eq a, Eq b) => a -> TmM a b -> Bool
 occurs a tm =
@@ -107,7 +107,7 @@ distinctVarsContaining
    . (Traversable t, Ord a, Ord b)
   => t (TmM a b)
   -> TmM a b
-  -> Maybe [Meta a b]
+  -> Maybe [Meta a a b]
 distinctVarsContaining tms tm =
   fmap DList.toList $
   evalState
@@ -127,9 +127,9 @@ distinctVarsContaining tms tm =
         tm
 
     go
-      :: (MonadState (Set (Meta a b)) m, Ord b)
+      :: (MonadState (Set (Meta a a b)) m, Ord b)
       => TmM a b
-      -> m (Maybe (DList (Meta a b)))
+      -> m (Maybe (DList (Meta a a b)))
     go (Var a) =
       case a of
         M{} -> pure Nothing
@@ -160,11 +160,11 @@ intersect l m =
   where
     go
       :: forall c
-       . Seq (Tm (Meta a b))
-      -> Seq (Tm (Meta a b))
+       . Seq (TmM a b)
+      -> Seq (TmM a b)
       -> Church.Either
            IntersectFailure
-           (Tm c -> Tm c, Tm (Meta a b) -> Tm (Meta a b))
+           (Tm c -> Tm c, TmM a b -> TmM a b)
     go a b =
       case (Seq.viewl a, Seq.viewl b) of
         (EmptyL, EmptyL) -> Church.right (id, id)
@@ -347,7 +347,8 @@ decompose Fst Fst = pure $ Success [] []
 decompose Snd Snd = pure $ Success [] []
 decompose (Lam s) (Lam s') = do
   v <- fresh
-  pure $ Success [] [(instantiate1 (Var $ L v) s, instantiate1 (Var $ R v) s')]
+  pure $
+    Success [] [(instantiate1 (Var $ L v) s, instantiate1 (Var $ R v) s')]
 decompose (Var a) (Var b) = pure $ if a == b then Success [] [] else Failure
 decompose (Var (M _)) _ = pure Postpone
 decompose _ (Var (M _)) = pure Postpone
@@ -359,12 +360,12 @@ data Result a b
   | Success [Solution a b] [(TmM a b, TmM a b)]
   deriving (Eq, Show)
 
-solve
+solve1
   :: (Ord a, Ord b, MonadSupply a m)
   => TmM a b
   -> TmM a b
   -> m (Result a b)
-solve tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
+solve1 tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
   | a == b =
     case intersect xs ys of
       Left DifferentArities -> pure Failure
@@ -376,7 +377,7 @@ solve tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
       res <- prune keep tm2
       pure $ maybe Postpone (\(tm', sol) -> Success sol [(tm1, tm')]) res
   | otherwise = pure Postpone
-solve tm1@(Neutral (Var (M a)) xs) y
+solve1 tm1@(Neutral (Var (M a)) xs) y
   | occurs a y = pure Failure
   | Just vars <- distinctVarsContaining xs y =
       pure $
@@ -385,8 +386,8 @@ solve tm1@(Neutral (Var (M a)) xs) y
       res <- prune keep y
       pure $ maybe Postpone (\(tm, sol) -> Success sol [(tm1, tm)]) res
   | otherwise = pure Postpone
-solve x (Neutral (Var (M b)) ys) = solve (Neutral (Var (M b)) ys) x
-solve a b = do
+solve1 x (Neutral (Var (M b)) ys) = solve1 (Neutral (Var (M b)) ys) x
+solve1 a b = do
   ma <- eta a
   case ma of
     Nothing -> decompose a b
