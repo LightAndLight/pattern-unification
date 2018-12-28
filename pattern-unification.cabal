@@ -29,6 +29,7 @@ library
                      , deriving-compat
                      , transformers
                      , containers
+                     , mmorph
                      , mtl
                      , ansi-wl-pprint
                      , church-maybe

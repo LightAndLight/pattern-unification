@@ -13,6 +13,7 @@ import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Writer.Strict (WriterT(..), runWriterT, tell)
 import Data.Bifunctor (bimap)
+import Data.Coerce (coerce)
 import Data.DList (DList)
 import Data.Foldable (toList)
 import Data.Monoid (Ap(..))
@@ -31,7 +32,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as Print
 import LambdaPi
 import Supply.Class
 
-type TmM a b = Tm (Meta a a b)
+type TmM a b = MetaT a a Tm b
 
 data Solution a b = Solution a (TmM a b)
   deriving (Eq, Show)
@@ -41,14 +42,14 @@ prettySolution aDoc bDoc (Solution a b) =
   Print.hsep
     [ Print.char '?' <> aDoc a
     , Print.text ":="
-    , prettyTm (prettyMeta aDoc aDoc bDoc) b
+    , prettyTm (prettyMeta aDoc aDoc bDoc) $ coerce b
     ]
 
 instance (Pretty a, Pretty b) => Pretty (Solution a b) where
   pretty = prettySolution pretty pretty
 
 occurs :: forall a b. (Eq a, Eq b) => a -> TmM a b -> Bool
-occurs a tm =
+occurs a (MetaT tm) =
   case tm of
     Var{} -> go False False tm
     Fst{} -> go False False tm
@@ -64,37 +65,39 @@ occurs a tm =
     isVar Var{} = True
     isVar _ = False
 
-    go :: forall c. (Eq a, Eq c) => Bool -> Bool -> TmM a c -> Bool
-    go _ _ (Var (M b)) = a == b
-    go _ _ (Var (N _)) = False
-    go _ _ (Var (L _)) = False
-    go _ _ (Var (R _)) = False
-    go _ _ Fst{} = False
-    go _ _ Snd{} = False
-    go inMeta inVar (Lam s) = go inMeta inVar (sequenceA <$> fromScope s)
-    go inMeta inVar (Pair d e) = go inMeta inVar d || go inMeta inVar e
-    go inMeta inVar (Neutral (Var (M b)) cs)
-      | a == b =
-        if inVar
-        then any ((||) <$> isVar <*> go True False) cs
-        else
-          if inMeta
-          then any (go True False) cs
-          else True
-      | otherwise = any (go True False) cs
-    go _ _ (Neutral (Var (N _)) cs) = any (go False True) cs
-    go _ _ (Neutral (Var (L _)) cs) = any (go False True) cs
-    go _ _ (Neutral (Var (R _)) cs) = any (go False True) cs
-    go _ _ (Neutral _ cs) = any (go False False) cs
+    go :: forall c. (Eq a, Eq c) => Bool -> Bool -> Tm (Meta a a c) -> Bool
+    go inMeta inVar tm1 =
+      case tm1 of
+        Var (M b) -> a == b
+        Var (N _) -> False
+        Var (L _) -> False
+        Var (R _) -> False
+        Fst{} -> False
+        Snd{} -> False
+        Lam s -> go inMeta inVar (sequenceA <$> fromScope s)
+        Pair d e -> go inMeta inVar d || go inMeta inVar e
+        Neutral (Var (M b)) cs
+          | a == b ->
+            if inVar
+            then any ((||) <$> isVar <*> (go True False)) cs
+            else
+              if inMeta
+              then any (go True False) cs
+              else True
+          | otherwise -> any (go True False) cs
+        Neutral (Var (N _)) cs -> any (go False True) cs
+        Neutral (Var (L _)) cs -> any (go False True) cs
+        Neutral (Var (R _)) cs -> any (go False True) cs
+        Neutral _ cs -> any (go False False) cs
 
 ex1 :: Bool
 ex1 =
-  occurs "alpha" $
+  occurs "alpha" . coerce $
   Var (N "x") .@ (Var (M "alpha") .@ Var (N "x"))
 
 ex2 :: Bool
 ex2 =
-  occurs "beta" $
+  occurs "beta" . coerce $
   Var (N "x") .@ (Var (M "beta") .@ lam (N "x") (Var $ N "x"))
 
 -- |
@@ -103,16 +106,16 @@ ex2 =
 --
 -- @O(n * log(n))@
 distinctVarsContaining
-  :: forall t a b
-   . (Traversable t, Ord a, Ord b)
-  => t (TmM a b)
+  :: forall a b
+   . (Ord a, Ord b)
+  => Seq (TmM a b)
   -> TmM a b
   -> Maybe [Meta a a b]
-distinctVarsContaining tms tm =
+distinctVarsContaining tms (MetaT tm) =
   fmap DList.toList $
   evalState
     (do
-        res <- getAp $ foldMap (Ap . go) tms
+        res <- getAp $ foldMap (Ap . go . coerce) tms
         isContained <- gets (contained `Set.isSubsetOf`)
         pure $ if isContained then res else Nothing)
     Set.empty
@@ -128,7 +131,7 @@ distinctVarsContaining tms tm =
 
     go
       :: (MonadState (Set (Meta a a b)) m, Ord b)
-      => TmM a b
+      => Tm (Meta a a b)
       -> m (Maybe (DList (Meta a a b)))
     go (Var a) =
       case a of
@@ -156,12 +159,13 @@ intersect
 intersect l m =
   -- use a church-encoded maybe for proper tail recursion
   Church.either Left Right $
-  bimap (\f -> f . Var . M) (\f -> f . Var . M) <$> go l m
+  bimap (\f -> coerce f . Var . M) (\f -> coerce f . Var . M) <$>
+  go (coerce l) (coerce m)
   where
     go
       :: forall c
-       . Seq (TmM a b)
-      -> Seq (TmM a b)
+       . Seq (Tm (Meta a a b))
+      -> Seq (Tm (Meta a a b))
       -> Church.Either
            IntersectFailure
            (Tm c -> Tm c, TmM a b -> TmM a b)
@@ -176,7 +180,7 @@ intersect l m =
           then
             bimap
               (\f xx -> Lam $ Scope $ f $ fmap (F . Var) xx .@ Var (B ()))
-              (\f xx -> f $ xx .@ Var (N x)) <$>
+              (\f (MetaT xx) -> coerce f $ xx .@ Var (N x)) <$>
             go xs ys
 
           -- The two variables disagree, so the solution ignores them
@@ -194,32 +198,32 @@ ex3 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
-        [Var (N "x"), Var (N "x")]
-        [Var (N "x"), Var (N "y")]
+        (MetaT <$> [Var (N "x"), Var (N "x")])
+        (MetaT <$> [Var (N "x"), Var (N "y")])
 
 ex4 :: (TmM String String, TmM String String)
 ex4 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
-        [Var (N "x"), Var (N "x"), Var (N "x")]
-        [Var (N "x"), Var (N "y"), Var (N "z")]
+        (MetaT <$> [Var (N "x"), Var (N "x"), Var (N "x")])
+        (MetaT <$> [Var (N "x"), Var (N "y"), Var (N "z")])
 
 ex5 :: (TmM String String, TmM String String)
 ex5 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
-        [Var (N "x"), Var (N "y"), Var (N "x")]
-        [Var (N "x"), Var (N "y"), Var (N "z")]
+        (MetaT <$> [Var (N "x"), Var (N "y"), Var (N "x")])
+        (MetaT <$> [Var (N "x"), Var (N "y"), Var (N "z")])
 
 ex6 :: (TmM String String, TmM String String)
 ex6 = (res "alpha", res' "alpha")
   where
     Right (res, res') =
       intersect
-        [Var (N "x"), Var (N "y"), Var (N "x")]
-        [Var (N "y"), Var (N "y"), Var (N "z")]
+        (MetaT <$> [Var (N "x"), Var (N "y"), Var (N "x")])
+        (MetaT <$> [Var (N "y"), Var (N "y"), Var (N "z")])
 
 pruneArgs
   :: forall a b
@@ -228,12 +232,12 @@ pruneArgs
   -> Maybe (a -> TmM a Void, a -> TmM a b)
 pruneArgs ctx =
   Church.maybe Nothing Just .
-  fmap (bimap (. (Var . M)) (. (Var . M))) .
-  go
+  fmap (bimap (\f -> coerce f . Var . M) (\f -> coerce f . Var . M)) .
+  go . coerce
   where
     go
       :: forall c
-       . Seq (TmM a b)
+       . Seq (Tm (Meta a a b))
       -> Church.Maybe (Tm c -> Tm c, TmM a b -> TmM a b)
     go a =
       case Seq.viewl a of
@@ -250,7 +254,7 @@ pruneArgs ctx =
                 Just{} ->
                   bimap
                     (\f xx -> Lam $ Scope $ f $ fmap (F . Var) xx .@ Var (B ()))
-                    (\f xx -> f $ xx .@ x) <$>
+                    (\f (MetaT xx) -> f . coerce $ xx .@ x) <$>
                   go xs
             _ -> Church.nothing
 
@@ -261,22 +265,24 @@ prune
   -> TmM a b
   -> m (Maybe (TmM a b, [Solution a b]))
 prune keep =
+  fmap coerce .
   runMaybeT .
   runWriterT .
-  go False (\x -> x <$ guard (Set.member x keep))
+  go False (\x -> x <$ guard (Set.member x keep)) .
+  coerce
   where
     go
       :: forall c
        . Bool
       -> (c -> Maybe c)
-      -> TmM a c
-      -> WriterT [Solution a b] (MaybeT m) (TmM a c)
+      -> Tm (Meta a a c)
+      -> WriterT [Solution a b] (MaybeT m) (Tm (Meta a a c))
     go _ _ (Var v) = pure $ Var v
     go underMeta ctx (Lam s) = do
       s' <-
         go underMeta (unvar (\() -> Just (B ())) (fmap F . ctx)) $
         sequenceA <$> fromScope s
-      pure $ Lam . toScope $ fmap metaVar s'
+      pure $ Lam . toScope $ fmap sequenceA s'
     go underMeta ctx (Pair a b) = do
       a' <- go underMeta ctx a
       b' <- go underMeta ctx b
@@ -287,20 +293,21 @@ prune keep =
       xs' <- traverse (go True ctx) xs
       if not underMeta
         then
-          case pruneArgs ctx xs' of
+          case pruneArgs ctx $ coerce xs' of
             Nothing -> empty
             Just (sol, tm') -> do
               v <- lift $ lift fresh
-              tell [Solution a $ fmap absurd <$> sol v]
-              pure $ tm' v
+              tell [Solution a $ absurd <$> sol v]
+              pure $ coerce (tm' v)
         else empty
     go underMeta ctx (Neutral a xs) = do
       xs' <- traverse (go underMeta ctx) xs
       pure $ Neutral a xs'
 
-varSet :: Ord b => Seq (TmM a b) -> Maybe (Set b)
-varSet = Church.maybe Nothing Just . go
+varSet :: forall a b. Ord b => Seq (TmM a b) -> Maybe (Set b)
+varSet = Church.maybe Nothing Just . go . coerce
   where
+    go :: Seq (Tm (Meta a a b)) -> Church.Maybe (Set b)
     go x =
       case Seq.viewl x of
         EmptyL -> Church.just mempty
@@ -311,18 +318,20 @@ eta
   :: MonadSupply a m
   => TmM a b
   -> m (Maybe (Solution a b, TmM a b))
-eta (Neutral (Var (M a)) xs) =
-  case Seq.viewl xs of
-    Fst :< _ -> do
-      p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
-      let sol = Solution a p
-      pure $ Just (sol, Neutral p xs)
-    Snd :< _ -> do
-      p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
-      let sol = Solution a p
-      pure $ Just (sol, Neutral p xs)
+eta (MetaT tm1) =
+  case tm1 of
+    Neutral (Var (M a)) xs ->
+      case Seq.viewl xs of
+        Fst :< _ -> do
+          p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
+          let sol = Solution a $ coerce p
+          pure $ Just (sol, coerce $ Neutral p xs)
+        Snd :< _ -> do
+          p <- Pair <$> fmap (Var . M) fresh <*> fmap (Var . M) fresh
+          let sol = Solution a $ coerce p
+          pure $ Just (sol, coerce $ Neutral p xs)
+        _ -> pure Nothing
     _ -> pure Nothing
-eta _ = pure Nothing
 
 zipMaybe :: [a] -> [b] -> Maybe [(a, b)]
 zipMaybe a b = Church.maybe Nothing Just $ go a b
@@ -332,63 +341,68 @@ zipMaybe a b = Church.maybe Nothing Just $ go a b
     go [] (_:_) = Church.nothing
     go (x:xs) (y:ys) = ((x, y) :) <$> go xs ys
 
-decompose
-  :: (Eq a, Eq b, MonadSupply a m)
-  => TmM a b
-  -> TmM a b
-  -> m (Result a b)
-decompose (Neutral x xs) (Neutral y ys) =
-  pure $
-  case zipMaybe (toList xs) (toList ys) of
-    Nothing -> Failure
-    Just xys -> Success [] $ (x, y) : xys
-decompose (Pair a a') (Pair b b') = pure $ Success [] [(a, b), (a', b')]
-decompose Fst Fst = pure $ Success [] []
-decompose Snd Snd = pure $ Success [] []
-decompose (Lam s) (Lam s') = do
-  v <- fresh
-  pure $
-    Success [] [(instantiate1 (Var $ L v) s, instantiate1 (Var $ R v) s')]
-decompose (Var a) (Var b) = pure $ if a == b then Success [] [] else Failure
-decompose (Var (M _)) _ = pure Postpone
-decompose _ (Var (M _)) = pure Postpone
-decompose _ _ = pure Failure
-
 data Result a b
   = Postpone
   | Failure
   | Success [Solution a b] [(TmM a b, TmM a b)]
   deriving (Eq, Show)
 
+decompose
+  :: (Eq a, Eq b, MonadSupply a m)
+  => TmM a b
+  -> TmM a b
+  -> m (Result a b)
+decompose (MetaT tm1) (MetaT tm2) =
+  case (tm1, tm2) of
+    (Neutral x xs, Neutral y ys) ->
+      pure $
+      case zipMaybe (toList xs) (toList ys) of
+        Nothing -> Failure
+        Just xys -> Success [] $ coerce (x, y) : coerce xys
+    (Pair a a', Pair b b') ->
+      pure $ Success [] [coerce (a, b), coerce (a', b')]
+    (Fst, Fst) -> pure $ Success [] []
+    (Snd, Snd) -> pure $ Success [] []
+    (Lam s, Lam s') -> do
+      v <- fresh
+      pure $
+        Success [] [(coerce $ instantiate1 (Var $ L v) s, coerce $ instantiate1 (Var $ R v) s')]
+    (Var a, Var b) -> pure $ if a == b then Success [] [] else Failure
+    (Var (M _), _) -> pure Postpone
+    (_, Var (M _)) -> pure Postpone
+    (_, _) -> pure Failure
+
 solve1
   :: (Ord a, Ord b, MonadSupply a m)
   => TmM a b
   -> TmM a b
   -> m (Result a b)
-solve1 tm1@(Neutral (Var (M a)) xs) tm2@(Neutral (Var (M b)) ys)
-  | a == b =
-    case intersect xs ys of
-      Left DifferentArities -> pure Failure
-      Left NotAllVars -> pure Postpone
-      Right (sol, tm') -> do
-        mv <- fresh
-        pure $ Success [Solution a $ sol mv] [(tm' mv, tm' mv)]
-  | Just keep <- varSet xs = do
-      res <- prune keep tm2
-      pure $ maybe Postpone (\(tm', sol) -> Success sol [(tm1, tm')]) res
-  | otherwise = pure Postpone
-solve1 tm1@(Neutral (Var (M a)) xs) y
-  | occurs a y = pure Failure
-  | Just vars <- distinctVarsContaining xs y =
-      pure $
-      Success [Solution a $ foldr lam y vars] []
-  | Just keep <- varSet xs = do
-      res <- prune keep y
-      pure $ maybe Postpone (\(tm, sol) -> Success sol [(tm1, tm)]) res
-  | otherwise = pure Postpone
-solve1 x (Neutral (Var (M b)) ys) = solve1 (Neutral (Var (M b)) ys) x
-solve1 a b = do
-  ma <- eta a
-  case ma of
-    Nothing -> decompose a b
-    Just (sol, a') -> pure $ Success [sol] [(a', b)]
+solve1 (MetaT tm1) (MetaT tm2) =
+  case (tm1, tm2) of
+    (Neutral (Var (M a)) xs, Neutral (Var (M b)) ys)
+      | a == b ->
+        case intersect (coerce xs) (coerce ys) of
+          Left DifferentArities -> pure Failure
+          Left NotAllVars -> pure Postpone
+          Right (sol, tm') -> do
+            mv <- fresh
+            pure $ Success [Solution a $ sol mv] [(tm' mv, tm' mv)]
+      | Just keep <- varSet $ coerce xs -> do
+          res <- prune keep $ coerce tm2
+          pure $ maybe Postpone (\(tm', sol) -> Success sol [(coerce tm1, tm')]) res
+      | otherwise -> pure Postpone
+    (Neutral (Var (M a)) xs, _)
+      | occurs a $ coerce tm2 -> pure Failure
+      | Just vars <- distinctVarsContaining (coerce xs) (coerce tm2) ->
+          pure $
+          Success [Solution a $ coerce $ foldr lam tm2 vars] []
+      | Just keep <- varSet $ coerce xs -> do
+          res <- prune keep $ coerce tm2
+          pure $ maybe Postpone (\(tm2', sol) -> Success sol [(coerce tm1, tm2')]) res
+      | otherwise -> pure Postpone
+    (_, Neutral (Var (M _)) _) -> solve1 (coerce tm2) (coerce tm1)
+    (_, _) -> do
+      ma <- eta $ MetaT tm1
+      case ma of
+        Nothing -> decompose (coerce tm1) (coerce tm2)
+        Just (sol, tm1') -> pure $ Success [sol] [(tm1', coerce tm2)]

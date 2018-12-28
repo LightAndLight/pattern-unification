@@ -3,6 +3,7 @@ module Main where
 
 import Prelude hiding (pi)
 
+import Data.Coerce (coerce)
 import Test.Hspec
 
 import LambdaPi
@@ -19,73 +20,86 @@ main :: IO ()
 main = hspec $ do
   describe "solve1 tests" $ do
     it "α x =?= x   -   α := λ. 0" $ do
-      runSupply nameSeed nameGen (solve1 (Var (M "alpha") .@ Var (N "x")) (Var (N "x")))
+      runSupply nameSeed nameGen
+        (solve1 (coerce $ Var (M "alpha") .@ Var (N "x")) (pure "x"))
         `shouldBe`
-        Success [Solution "alpha" $ lam (N "x") (Var $ N "x")] []
+        Success [Solution "alpha" $ lamM "x" $ pure "x"] []
     it "α x y =?= x   -   α := λ. λ. 1" $ do
-      runSupply nameSeed nameGen (solve1 (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (N "x")))
+      runSupply nameSeed nameGen
+        (solve1
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "y"))
+           (coerce $ Var (N "x")))
         `shouldBe`
-        Success [Solution "alpha" $ lam (N "x") $ lam (N "y") $ (Var $ N "x")] []
+        Success [Solution "alpha" $ lamM "x" $ lamM "y" $ pure "x"] []
     it "α x y =?= y   -   α := λ. λ. 0" $ do
-      runSupply nameSeed nameGen (solve1 (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (N "y")))
+      runSupply nameSeed nameGen
+        (solve1
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "y"))
+           (coerce $ Var (N "y")))
         `shouldBe`
-        Success [Solution "alpha" $ lam (N "x") $ lam (N "y") $ (Var $ N "y")] []
+        Success [Solution "alpha" $ lamM "x" $ lamM "y" $ pure "y"] []
     it "α x y =?= α y   -   fails" $ do
-      runSupply nameSeed nameGen (solve1 (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (M "alpha") .@ Var (N "y")))
+      runSupply nameSeed nameGen
+        (solve1
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "y"))
+           (coerce $ Var (M "alpha") .@ Var (N "y")))
         `shouldBe`
         Failure
     it "α x y =?= α x z   -   α := λ. λ. β 1   ,   β x =?= β x" $ do
-      runSupply nameSeed nameGen (solve1 (Var (M "alpha") .@ Var (N "x") .@ Var (N "y")) (Var (M "alpha") .@ Var (N "x") .@ Var (N "z")))
+      runSupply nameSeed nameGen
+        (solve1
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "y"))
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "z")))
         `shouldBe`
         Success
           [ Solution "alpha" $
-            lam (N "x") $ lam (N "_") $ Var (M "t0") .@ Var (N "x")
+            lamM "x" $ lamM "_" . coerce $ Var (M "t0") .@ Var (N "x")
           ]
-          [(Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
+          [coerce (Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
     it "α x x =?= α y x   -   α := λ. λ. β 0   ,   β x =?= β x" $ do
       runSupply nameSeed nameGen
         (solve1
-           (Var (M "alpha") .@ Var (N "x") .@ Var (N "x"))
-           (Var (M "alpha") .@ Var (N "y") .@ Var (N "x")))
+           (coerce $ Var (M "alpha") .@ Var (N "x") .@ Var (N "x"))
+           (coerce $ Var (M "alpha") .@ Var (N "y") .@ Var (N "x")))
         `shouldBe`
         Success
           [ Solution "alpha" $
-            lam (N "y") $ lam (N "x") $ Var (M "t0") .@ Var (N "x")
+            lamM "y" $ lamM "x" . coerce $ Var (M "t0") .@ Var (N "x")
           ]
-          [(Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
+          [coerce (Var (M "t0") .@ Var (N "x"), Var (M "t0") .@ Var (N "x"))]
     it "α x =?= x (β y)   -   β := λ. γ   ,   α x =?= x γ" $ do
       runSupply nameSeed nameGen
         (solve1
-           (Var (M "alpha") .@ Var (N "x"))
-           (Var (N "x") .@ (Var (M "beta") .@ Var (N "y"))))
+           (coerce $ Var (M "alpha") .@ Var (N "x"))
+           (coerce $ Var (N "x") .@ (Var (M "beta") .@ Var (N "y"))))
         `shouldBe`
         Success
-          [Solution "beta" $ lam (N "y") $ Var (M "t0")]
-          [(Var (M "alpha") .@ Var (N "x"), Var (N "x") .@ Var (M "t0"))]
+          [Solution "beta" $ lamM "y" . coerce $ Var (M "t0")]
+          [coerce (Var (M "alpha") .@ Var (N "x"), Var (N "x") .@ Var (M "t0"))]
     it "α x =?= x γ   -   α := λ. 0 γ" $ do
       runSupply nameSeed nameGen
         (solve1
-           (Var (M "alpha") .@ Var (N "x"))
-           (Var (N "x") .@ Var (M "gamma")))
+           (coerce $ Var (M "alpha") .@ Var (N "x"))
+           (coerce $ Var (N "x") .@ Var (M "gamma")))
         `shouldBe`
         Success
-          [Solution "alpha" $ lam (N "x") $ Var (N "x") .@ Var (M "gamma")]
+          [Solution "alpha" $ lamM "x" . coerce $ Var (N "x") .@ Var (M "gamma")]
           []
     it "λ. 0 =?= λ. α 0   -   <x =?= α >x" $ do
       runSupply nameSeed nameGen
         (solve1
-           (lam (N "x") $ Var (N "x"))
-           (lam (N "x") $ Var (M "alpha") .@ Var (N "x")))
+           (lamM "x" $ pure "x")
+           (lamM "x" . coerce $ Var (M "alpha") .@ Var (N "x")))
         `shouldBe`
         Success
           []
-          [(Var $ L "t0", Var (M "alpha") .@ Var (R "t0"))]
+          [coerce (Var $ L "t0", Var (M "alpha") .@ Var (R "t0"))]
     it "<x =?= α >x   -   α := λ. 0" $ do
       runSupply nameSeed nameGen
         (solve1
-           (Var $ L "t0")
-           (Var (M "alpha") .@ Var (R "t0")))
+           (MetaT $ Var $ L "t0")
+           (MetaT $ Var (M "alpha") .@ Var (R "t0")))
         `shouldBe`
         Success
-          [Solution "alpha" $ lam (N "x") (Var $ N "x")]
+          [Solution "alpha" $ lamM "x" (pure "x")]
           []

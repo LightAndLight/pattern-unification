@@ -7,6 +7,7 @@
 {-# language OverloadedLists #-}
 {-# language StandaloneDeriving, TemplateHaskell #-}
 {-# language RankNTypes, ScopedTypeVariables #-}
+{-# language QuantifiedConstraints #-}
 module LambdaPi where
 
 import Prelude hiding (pi)
@@ -27,6 +28,7 @@ import Data.Deriving (deriveShow1, deriveEq1)
 import Data.Foldable (toList)
 import Data.Maybe (fromMaybe)
 import Data.Sequence ((|>), Seq)
+import Data.Traversable (foldMapDefault)
 import Text.PrettyPrint.ANSI.Leijen (Doc, Pretty(..))
 
 import qualified Text.PrettyPrint.ANSI.Leijen as Print
@@ -129,6 +131,16 @@ instance Monad Tm where
 lam :: Eq a => a -> Tm a -> Tm a
 lam a = Lam . abstract1 a
 
+lamM
+  :: Eq c
+  => c
+  -> MetaT a b Tm c
+  -> MetaT a b Tm c
+lamM a =
+  MetaT . Lam .
+  toScope . fmap sequenceA . unMetaT . fromScope .
+  abstract1 a
+
 instance AsElim (Tm a) Tm a where
   _Elim =
     prism'
@@ -219,12 +231,13 @@ instance (Ord a, Ord b, Ord c) => Ord (Meta a b c) where
   M{} `compare` R{} = GT
   N{} `compare` R{} = GT
 
-metaVar :: Meta a b (Var c d) -> Var c (Meta a b d)
-metaVar (M a) = F (M a)
-metaVar (L a) = F (L a)
-metaVar (R a) = F (R a)
-metaVar (N (B a)) = B a
-metaVar (N (F a)) = F (N a)
+instance Foldable (Meta a b) where
+  foldMap = foldMapDefault
+instance Traversable (Meta a b) where
+  sequenceA (M a) = pure (M a)
+  sequenceA (L a) = pure (L a)
+  sequenceA (R a) = pure (R a)
+  sequenceA (N a) = N <$> a
 
 instance Functor (Meta a b) where
   fmap _ (M a) = M a
@@ -242,11 +255,47 @@ instance Applicative (Meta a b) where
   _ <*> L a = L a
   _ <*> R a = R a
 
+instance Monad (Meta a b) where
+  N a >>= f = f a
+  L a >>= _ = L a
+  R a >>= _ = R a
+  M a >>= _ = M a
+
 instance Bifunctor (Meta a) where
   bimap _ _ (M a) = M a
   bimap f _ (L a) = L (f a)
   bimap f _ (R a) = R (f a)
   bimap _ g (N a) = N (g a)
+
+newtype MetaT a b m c = MetaT { unMetaT :: m (Meta a b c) }
+deriving instance
+  ( forall x. Eq x => Eq (m x)
+  , Eq a
+  , Eq b
+  , Eq c
+  )
+  => Eq (MetaT a b m c)
+deriving instance
+  ( forall x. Show x => Show (m x)
+  , Show a
+  , Show b
+  , Show c
+  )
+  => Show (MetaT a b m c)
+
+instance Functor m => Functor (MetaT a b m) where
+  fmap f (MetaT m) = MetaT $ fmap (fmap f) m
+instance Applicative m => Applicative (MetaT a b m) where
+  pure = MetaT . pure . pure
+  MetaT a <*> MetaT b = MetaT $ (<*>) <$> a <*> b
+instance Monad m => Monad (MetaT a b m) where
+  MetaT ma >>= f = MetaT $ do
+    a <- ma
+    case a of
+      N x -> unMetaT $ f x
+      L x -> pure $ L x
+      R x -> pure $ R x
+      M x -> pure $ M x
 
 instance Pretty a => Pretty (Tm a) where
   pretty = prettyTm pretty
