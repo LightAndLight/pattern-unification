@@ -16,6 +16,7 @@ import Data.Bifunctor (bimap)
 import Data.Coerce (coerce)
 import Data.DList (DList)
 import Data.Foldable (toList)
+import Data.Functor.Product (Product)
 import Data.Monoid (Ap(..))
 import Data.Set (Set)
 import Data.Sequence (Seq, ViewL(..))
@@ -25,6 +26,7 @@ import Text.PrettyPrint.ANSI.Leijen (Doc, Pretty(..))
 import qualified Data.Church.Either as Church
 import qualified Data.Church.Maybe as Church
 import qualified Data.DList as DList
+import qualified Data.Functor.Product as Functor
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 import qualified Text.PrettyPrint.ANSI.Leijen as Print
@@ -33,6 +35,17 @@ import LambdaPi
 import Supply.Class
 
 type TmM a b = MetaT a a Tm b
+
+data Twin a = TL a | TR a
+
+newtype Problem a b
+  = Problem
+  { unProblem
+    :: Scope
+         (Twin a)
+         (Product (MetaT a a Tm) (MetaT a a Tm))
+         b
+  }
 
 data Solution a b = Solution a (TmM a b)
   deriving (Eq, Show)
@@ -371,6 +384,44 @@ decompose (MetaT tm1) (MetaT tm2) =
     (Var (M _), _) -> pure Postpone
     (_, Var (M _)) -> pure Postpone
     (_, _) -> pure Failure
+
+data Result' a b
+  = Postpone'
+  | Failure'
+  | Success' [Solution a b] [Problem a b]
+
+decompose'
+  :: (Eq a, Eq b, MonadSupply a m)
+  => Problem a b
+  -> m (Result' a b)
+decompose' (Problem sc) =
+  case fromScope sc of
+    Functor.Pair a b -> decompose'' a b
+  where
+    decompose''
+      :: (Eq a, Eq b, MonadSupply a m)
+      => TmM a (Var (Twin a) b)
+      -> TmM a (Var (Twin a) b)
+      -> m (Result' a b)
+    decompose'' (MetaT tm1) (MetaT tm2) = 
+      case (tm1, tm2) of
+        (Neutral x xs, Neutral y ys) ->
+          pure $
+          case zipMaybe (toList xs) (toList ys) of
+            Nothing -> Failure'
+            Just xys -> Success' [] $ Problem (_ x y) : _ xys
+        (Pair a a', Pair b b') ->
+          pure $ Success' [] [Problem (_ a b), Problem (_ a' b')]
+        (Fst, Fst) -> pure $ Success' [] []
+        (Snd, Snd) -> pure $ Success' [] []
+        (Lam s, Lam s') -> do
+          v <- fresh
+          pure $
+            Success' [] [Problem (_ (instantiate1 (Var $ L v) s) (instantiate1 (Var $ R v) s'))]
+        (Var a, Var b) -> pure $ if a == b then Success' [] [] else Failure'
+        (Var (M _), _) -> pure Postpone'
+        (_, Var (M _)) -> pure Postpone'
+        (_, _) -> pure Failure'
 
 solve1
   :: (Ord a, Ord b, MonadSupply a m)
