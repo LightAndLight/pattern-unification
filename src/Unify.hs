@@ -10,11 +10,13 @@
 module Unify where
 
 import Bound.Scope (instantiate1)
+import Control.Applicative (liftA2)
 import Control.Lens.Getter ((^.))
 import Control.Lens.Iso (iso)
 import Control.Lens.Wrapped (Wrapped(..), Rewrapped, _Wrapped, _Unwrapped)
 import Control.Monad.Except (MonadError, ExceptT(..), runExceptT, throwError)
-import Control.Monad.Trans.Class (lift)
+import Control.Monad.State (MonadState, StateT(..), gets)
+import Control.Monad.Trans.Class (MonadTrans, lift)
 import Data.Map (Map)
 import Data.Sequence (Seq, ViewL(..))
 
@@ -23,112 +25,179 @@ import qualified Data.Sequence as Seq
 
 import Tm
 
-data T a = L a | R a
-newtype Twinned b f a = Twinned { unTwinned :: ExceptT (T b) f a }
-  deriving (Functor, Applicative, Monad)
+data Head a b c
+  = Meta a
+  | TwinL b
+  | TwinR b
+  | Normal c
+  deriving (Functor, Show)
 
-lt :: Applicative f => b -> f (Either (T b) a)
-lt = pure . Left . L
+foldHead :: (a -> r) -> (b -> r) -> (b -> r) -> (c -> r) -> Head a b c -> r
+foldHead a bl br c h =
+  case h of
+    Meta x -> a x
+    TwinL x -> bl x
+    TwinR x -> br x
+    Normal x -> c x
 
-rt :: Applicative f => b -> f (Either (T b) a)
-rt = pure . Left . R
+instance (Eq a, Eq b, Eq c) => Eq (Head a b c) where
+  Meta a == Meta b = a == b
+  TwinL a == TwinL b = a == b
+  TwinL a == TwinR b = a == b
+  TwinR a == TwinL b = a == b
+  TwinR a == TwinR b = a == b
+  Normal a == Normal b = a == b
+  _ == _ = False
 
-instance Wrapped (Twinned b f a) where
-  type Unwrapped (Twinned b f a) = f (Either (T b) a)
-  _Wrapped' = iso (runExceptT . unTwinned) (Twinned . ExceptT)
-instance t ~ Twinned b' f' a' => Rewrapped (Twinned b f a) t where
+instance Applicative (Head a b) where
+  pure = Normal
+  Meta a <*> b = Meta a
+  TwinL a <*> b = TwinL a
+  TwinR a <*> b = TwinR a
+  Normal a <*> Meta b = Meta b
+  Normal a <*> TwinL b = TwinL b
+  Normal a <*> TwinR b = TwinR b
+  Normal a <*> Normal b = Normal (a b)
 
-data Twin b a = Twin (Twinned b Ty a) (Twinned b Ty a)
+instance Monad (Head a b) where
+  Meta a >>= f = Meta a
+  TwinL a >>= f = TwinL a
+  TwinR a >>= f = TwinR a
+  Normal a >>= f = f a
+
+newtype HeadT a b m c = HeadT { unHeadT :: m (Head a b c) }
   deriving Functor
 
-data Equation b a
+instance Applicative m => Applicative (HeadT a b m) where
+  pure = HeadT . pure . pure
+  HeadT a <*> HeadT b = HeadT $ liftA2 (<*>) a b
+
+instance Monad m => Monad (HeadT a b m) where
+  HeadT a >>= f =
+    HeadT $ do
+      a' <- a
+      case a' of
+        Meta a -> pure $ Meta a
+        TwinL a -> pure $ TwinL a
+        TwinR a -> pure $ TwinR a
+        Normal a -> unHeadT $ f a
+
+lt :: Applicative f => b -> f (Head a b c)
+lt = pure . TwinL
+
+rt :: Applicative f => b -> f (Head a b c)
+rt = pure . TwinR
+
+data Twin a b c = Twin (HeadT a b Ty c) (HeadT a b Ty c)
+  deriving Functor
+
+data Equation a b c
   = Equation
-  { eqCtx :: Map b (Twin b a)
-  , eqLhsTm :: Twinned b Tm a
-  , eqLhsTy :: Twinned b Ty a
-  , eqRhsTm :: Twinned b Tm a
-  , eqRhsTy :: Twinned b Ty a
+  { eqCtx :: Map b (Twin a b c)
+  , eqLhsTm :: HeadT a b Tm c
+  , eqLhsTy :: HeadT a b Ty c
+  , eqRhsTm :: HeadT a b Tm c
+  , eqRhsTy :: HeadT a b Ty c
   }
 
-eta :: Equation Int a -> [Equation Int a]
+eta :: Equation a Int c -> [Equation a Int c]
 eta (Equation ctx ltm lty rtm rty) =
-  case (ltm ^. _Wrapped, lty ^. _Wrapped, rtm ^. _Wrapped, rty ^. _Wrapped) of
+  case (unHeadT ltm , unHeadT lty, unHeadT rtm, unHeadT rty) of
     (s, Pi a b, s', Pi a' b') ->
       [ Equation
-          (Map.insert newVar (Twin (a ^. _Unwrapped) (a' ^. _Unwrapped)) ctx)
-          ((s .@ lt newVar) ^. _Unwrapped)
-          (instantiate1 (lt newVar) b ^. _Unwrapped)
-          ((s' .@ rt newVar) ^. _Unwrapped)
-          (instantiate1 (rt newVar) b' ^. _Unwrapped)
+          (Map.insert newVar (Twin (HeadT a) (HeadT a')) ctx)
+          (HeadT $ s .@ lt newVar)
+          (HeadT $ instantiate1 (lt newVar) b)
+          (HeadT $ s' .@ rt newVar)
+          (HeadT $ instantiate1 (rt newVar) b')
       ]
       where newVar = Map.size ctx
     (s, Sigma c d, s', Sigma c' d') ->
       [ Equation
           ctx
-          ((s .@ Fst) ^. _Unwrapped)
-          (c ^. _Unwrapped)
-          ((s' .@ Fst) ^. _Unwrapped)
-          (c' ^. _Unwrapped)
+          (HeadT $ s .@ Fst)
+          (HeadT c)
+          (HeadT $ s' .@ Fst)
+          (HeadT c')
       , Equation
           ctx
-          ((s .@ Snd) ^. _Unwrapped)
-          (instantiate1 (s .@ Fst) d ^. _Unwrapped)
-          ((s' .@ Snd) ^. _Unwrapped)
-          (instantiate1 (s' .@ Fst) d' ^. _Unwrapped)
+          (HeadT $ s .@ Snd)
+          (HeadT $ instantiate1 (s .@ Fst) d)
+          (HeadT $ s' .@ Snd)
+          (HeadT $ instantiate1 (s' .@ Fst) d')
       ]
     _ -> []
 
-data UnifyError b a
-  = Mismatch (Twinned b Tm a) (Twinned b Tm a)
-  | NotInScope (Either b a)
+newtype UnifyM a b c x
+  = UnifyM
+  { unUnifyM
+    :: StateT
+         (Map a (HeadT a b Tm c))
+         (Either (UnifyError a b c))
+         x
+  }
+  deriving (Functor, Applicative, Monad, MonadState (Map a (HeadT a b Tm c)), MonadError (UnifyError a b c))
+
+data UnifyError a b c
+  = Mismatch (HeadT a b Tm c) (HeadT a b Tm c)
+  | NotInScope (Head a b c)
 
 lookupTwin
-  :: (MonadError (UnifyError b a) m, Ord b)
-  => T b
-  -> Map b (Twin b a)
-  -> m (Twinned b Tm a)
-lookupTwin (L b) mp =
+  :: (MonadError (UnifyError a b c) m, Ord b)
+  => Either b b
+  -> Map b (Twin a b c)
+  -> m (HeadT a b Tm c)
+lookupTwin (Left b) mp =
   case Map.lookup b mp of
     Just (Twin a _) -> pure a
-    Nothing -> throwError $ NotInScope (Left b)
-lookupTwin (R b) mp =
+    Nothing -> throwError $ NotInScope (TwinL b)
+lookupTwin (Right b) mp =
   case Map.lookup b mp of
     Just (Twin _ a) -> pure a
-    Nothing -> throwError $ NotInScope (Left b)
+    Nothing -> throwError $ NotInScope (TwinR b)
+
+lookupMeta :: Ord a => a -> UnifyM a b c (HeadT a b Tm c)
+lookupMeta a = do
+  res <- gets $ Map.lookup a
+  case res of
+    Nothing -> throwError . NotInScope $ Meta a
+    Just val -> pure val
 
 decompose
-  :: forall m a b
-   . (MonadError (UnifyError b a) m, Eq a, Ord b)
-  => (a -> m (Twinned b Tm a))
-  -> Map b (Twin b a)
-  -> (Tm (Either (T b) a), Seq (Tm (Either (T b) a)))
-  -> (Tm (Either (T b) a), Seq (Tm (Either (T b) a)))
-  -> m (Maybe [Equation b a])
+  :: forall a b c
+   . (Ord a, Ord b)
+  => (c -> UnifyM a b c (HeadT a b Tm c))
+  -> Map b (Twin a b c)
+  -> (Tm (Head a b c), Seq (Tm (Head a b c)))
+  -> (Tm (Head a b c), Seq (Tm (Head a b c)))
+  -> UnifyM a b c (Maybe [Equation a b c])
 decompose globals ctx (Var x, xs) (Var y, ys) = do
-  xTy <- either (flip lookupTwin ctx) globals x
-  yTy <- either (flip lookupTwin ctx) globals y
-  Just <$> go (Var x) (xTy ^. _Wrapped) xs (Var y) (yTy ^. _Wrapped) ys
+  xTy <- foldHead lookupMeta (getTwin . Left) (getTwin . Right) globals x
+  yTy <- foldHead lookupMeta (getTwin . Left) (getTwin . Right) globals y
+  Just <$> go (Var x) (unHeadT xTy) xs (Var y) (unHeadT yTy) ys
   where
+    getTwin = flip lookupTwin ctx
+
     go
-      :: Tm (Either (T b) a)
-      -> Ty (Either (T b) a)
-      -> Seq (Tm (Either (T b) a))
+      :: Tm (Head a b c)
+      -> Ty (Head a b c)
+      -> Seq (Tm (Head a b c))
 
-      -> Tm (Either (T b) a)
-      -> Ty (Either (T b) a)
-      -> Seq (Tm (Either (T b) a))
+      -> Tm (Head a b c)
+      -> Ty (Head a b c)
+      -> Seq (Tm (Head a b c))
 
-      -> m [Equation b a]
+      -> UnifyM a b c [Equation a b c]
     go va tas as vb tbs bs =
       case (tas, Seq.viewl as, tbs, Seq.viewl bs) of
         (_, EmptyL, _, EmptyL) ->
           pure $
           [ Equation
               ctx
-              (va ^. _Unwrapped)
-              (tas ^. _Unwrapped)
-              (vb ^. _Unwrapped)
-              (tbs ^. _Unwrapped)
+              (HeadT va)
+              (HeadT tas)
+              (HeadT vb)
+              (HeadT tbs)
           ]
         (Sigma s _, Fst :< aas, Sigma s' _, Fst :< bbs) ->
           go
@@ -141,64 +210,66 @@ decompose globals ctx (Var x, xs) (Var y, ys) = do
         (Pi s t, aa :< aas, Pi s' t', bb :< bbs) ->
           (Equation
             ctx
-            (aa ^. _Unwrapped)
-            (s ^. _Unwrapped)
-            (bb ^. _Unwrapped)
-            (s' ^. _Unwrapped) :) <$>
+            (HeadT aa)
+            (HeadT s)
+            (HeadT bb)
+            (HeadT s') :) <$>
           go
             (va .@ aa) (instantiate1 aa t) aas
             (vb .@ bb) (instantiate1 bb t') bbs
         _ ->
           throwError $
           Mismatch
-            (App (Var x) xs ^. _Unwrapped)
-            (App (Var y) ys ^. _Unwrapped)
+            (HeadT $ App (Var x) xs)
+            (HeadT $ App (Var y) ys)
 decompose _ _ _ _ = pure Nothing
 
-varsMatch :: (Eq b, Eq a) => Either (T b) a -> Either (T b) a -> Bool
-varsMatch (Left (L a)) (Left (L b)) = a == b
-varsMatch (Left (L a)) (Left (R b)) = a == b
-varsMatch (Left (R a)) (Left (L b)) = a == b
-varsMatch (Left (R a)) (Left (R b)) = a == b
-varsMatch (Right a) (Right b) = a == b
-varsMatch _ _ = False
+flex :: Equation a b c -> UnifyM a b c (Maybe [Equation a b c])
+flex (Equation ctx ltm lty rtm rty) =
+  case (unHeadT ltm, unHeadT rtm) of
+    (App (Var x) xs, App (Var y) ys) -> flexFlex x xs lty y ys rty
+    (App (Var x) xs, y) -> flexRigid x xs lty y rty
+    _ -> pure Nothing
+  where
+    flexRigid = _
+    flexFlex = _
 
 rigidRigid
-  :: (MonadError (UnifyError b a) m, Eq a, Ord b)
-  => (a -> m (Twinned b Tm a))
-  -> Equation b a
-  -> m [Equation b a]
+  :: (Ord a, Ord b, Eq c)
+  => (c -> UnifyM a b c (HeadT a b Tm c))
+  -> Equation a b c
+  -> UnifyM a b c [Equation a b c]
 rigidRigid globals (Equation ctx ltm lty rtm rty) =
-  case (ltm ^. _Wrapped, lty ^. _Wrapped, rtm ^. _Wrapped, rty ^. _Wrapped) of
+  case (unHeadT ltm, unHeadT lty, unHeadT rtm, unHeadT rty) of
     (Pi a b, Type, Pi a' b', Type) ->
       pure
       [ Equation
           ctx
-          (a ^. _Unwrapped)
-          (Type ^. _Unwrapped)
-          (a' ^. _Unwrapped)
-          (Type ^. _Unwrapped)
+          (HeadT a)
+          (HeadT Type)
+          (HeadT a')
+          (HeadT Type)
       , Equation
           ctx
-          (Lam b ^. _Unwrapped)
-          (Pi Type (lift Type) ^. _Unwrapped)
-          (Lam b' ^. _Unwrapped)
-          (Pi Type (lift Type) ^. _Unwrapped)
+          (HeadT $ Lam b)
+          (HeadT $ Pi Type (lift Type))
+          (HeadT $ Lam b')
+          (HeadT $ Pi Type (lift Type))
       ]
     (Sigma a b, Type, Sigma a' b', Type) ->
       pure
       [ Equation
           ctx
-          (a ^. _Unwrapped)
-          (Type ^. _Unwrapped)
-          (a' ^. _Unwrapped)
-          (Type ^. _Unwrapped)
+          (HeadT a)
+          (HeadT Type)
+          (HeadT a')
+          (HeadT Type)
       , Equation
           ctx
-          (Lam b ^. _Unwrapped)
-          (Pi Type (lift Type) ^. _Unwrapped)
-          (Lam b' ^. _Unwrapped)
-          (Pi Type (lift Type) ^. _Unwrapped)
+          (HeadT $ Lam b)
+          (HeadT $ Pi Type (lift Type))
+          (HeadT $ Lam b')
+          (HeadT $ Pi Type (lift Type))
       ]
     (App x xs, t, App y ys, t') -> do
       meqs <- decompose globals ctx (x, xs) (y, ys)
@@ -208,19 +279,19 @@ rigidRigid globals (Equation ctx ltm lty rtm rty) =
           pure $
           Equation
             ctx
-            (t ^. _Unwrapped)
-            (Type ^. _Unwrapped)
-            (t' ^. _Unwrapped)
-            (Type ^. _Unwrapped) :
+            (HeadT t)
+            (HeadT Type)
+            (HeadT t')
+            (HeadT Type) :
           eqs
-    (Var a, t, Var b, t') | varsMatch a b ->
+    (Var a, t, Var b, t') | a == b ->
         pure
         [ Equation
             ctx
-            (t ^. _Unwrapped)
-            (Type ^. _Unwrapped)
-            (t' ^. _Unwrapped)
-            (Type ^. _Unwrapped)
+            (HeadT t)
+            (HeadT Type)
+            (HeadT t')
+            (HeadT Type)
         ]
     -- woo
     (Type, Type, Type, Type) -> pure []
