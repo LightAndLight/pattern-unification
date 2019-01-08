@@ -1,5 +1,6 @@
 {-# language DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
 {-# language DeriveGeneric #-}
+{-# language FlexibleContexts #-}
 {-# language FlexibleInstances, MultiParamTypeClasses #-}
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language OverloadedLists #-}
@@ -12,7 +13,7 @@ import Bound.Scope (instantiate1)
 import Control.Lens.Getter ((^.))
 import Control.Lens.Iso (iso)
 import Control.Lens.Wrapped (Wrapped(..), Rewrapped, _Wrapped, _Unwrapped)
-import Control.Monad.Except (ExceptT(..), runExceptT)
+import Control.Monad.Except (MonadError, ExceptT(..), runExceptT, throwError)
 import Control.Monad.Trans.Class (lift)
 import Data.Map (Map)
 import Data.Sequence (Seq, ViewL(..))
@@ -55,55 +56,59 @@ eta (Equation ctx ltm lty rtm rty) =
     (s, Pi a b, s', Pi a' b') ->
       [ Equation
           (Map.insert newVar (Twin (a ^. _Unwrapped) (a' ^. _Unwrapped)) ctx)
-          (App s [lt newVar] ^. _Unwrapped)
+          ((s .@ lt newVar) ^. _Unwrapped)
           (instantiate1 (lt newVar) b ^. _Unwrapped)
-          (App s' [rt newVar] ^. _Unwrapped)
+          ((s' .@ rt newVar) ^. _Unwrapped)
           (instantiate1 (rt newVar) b' ^. _Unwrapped)
       ]
       where newVar = Map.size ctx
     (s, Sigma c d, s', Sigma c' d') ->
       [ Equation
           ctx
-          (App s [Fst] ^. _Unwrapped)
+          ((s .@ Fst) ^. _Unwrapped)
           (c ^. _Unwrapped)
-          (App s' [Fst] ^. _Unwrapped)
+          ((s' .@ Fst) ^. _Unwrapped)
           (c' ^. _Unwrapped)
       , Equation
           ctx
-          (App s [Snd] ^. _Unwrapped)
-          (instantiate1 (App s [Fst]) d ^. _Unwrapped)
-          (App s' [Snd] ^. _Unwrapped)
-          (instantiate1 (App s' [Fst]) d' ^. _Unwrapped)
+          ((s .@ Snd) ^. _Unwrapped)
+          (instantiate1 (s .@ Fst) d ^. _Unwrapped)
+          ((s' .@ Snd) ^. _Unwrapped)
+          (instantiate1 (s' .@ Fst) d' ^. _Unwrapped)
       ]
     _ -> []
 
-lookupTwin :: Ord b => T b -> Map b (Twin b a) -> Maybe (Twinned b Tm a)
+data UnifyError b a
+  = Mismatch (Twinned b Tm a) (Twinned b Tm a)
+  | NotInScope (Either b a)
+
+lookupTwin
+  :: (MonadError (UnifyError b a) m, Ord b)
+  => T b
+  -> Map b (Twin b a)
+  -> m (Twinned b Tm a)
 lookupTwin (L b) mp =
   case Map.lookup b mp of
-    Just (Twin a _) -> Just a
-    Nothing -> Nothing
+    Just (Twin a _) -> pure a
+    Nothing -> throwError $ NotInScope (Left b)
 lookupTwin (R b) mp =
   case Map.lookup b mp of
-    Just (Twin _ a) -> Just a
-    Nothing -> Nothing
+    Just (Twin _ a) -> pure a
+    Nothing -> throwError $ NotInScope (Left b)
 
 decompose
-  :: forall a b
-   . (Eq a, Ord b)
-  => (a -> Maybe (Twinned b Tm a))
+  :: forall m a b
+   . (MonadError (UnifyError b a) m, Eq a, Ord b)
+  => (a -> m (Twinned b Tm a))
   -> Map b (Twin b a)
   -> (Tm (Either (T b) a), Seq (Tm (Either (T b) a)))
   -> (Tm (Either (T b) a), Seq (Tm (Either (T b) a)))
-  -> [Equation b a]
-decompose globals ctx (Var x, xs) (Var y, ys) =
-  case (,) <$> xTy <*> yTy of
-    Just (t1, t2) ->
-      go (Var x) (t1 ^. _Wrapped) xs (Var y) (t2 ^. _Wrapped) ys
-    _ -> []
+  -> m (Maybe [Equation b a])
+decompose globals ctx (Var x, xs) (Var y, ys) = do
+  xTy <- either (flip lookupTwin ctx) globals x
+  yTy <- either (flip lookupTwin ctx) globals y
+  Just <$> go (Var x) (xTy ^. _Wrapped) xs (Var y) (yTy ^. _Wrapped) ys
   where
-    xTy = either (flip lookupTwin ctx) globals x
-    yTy = either (flip lookupTwin ctx) globals y
-
     go
       :: Tm (Either (T b) a)
       -> Ty (Either (T b) a)
@@ -113,10 +118,11 @@ decompose globals ctx (Var x, xs) (Var y, ys) =
       -> Ty (Either (T b) a)
       -> Seq (Tm (Either (T b) a))
 
-      -> [Equation b a]
+      -> m [Equation b a]
     go va tas as vb tbs bs =
       case (tas, Seq.viewl as, tbs, Seq.viewl bs) of
         (_, EmptyL, _, EmptyL) ->
+          pure $
           [ Equation
               ctx
               (va ^. _Unwrapped)
@@ -133,22 +139,39 @@ decompose globals ctx (Var x, xs) (Var y, ys) =
             (va .@ Snd) (instantiate1 (va .@ Fst) t) aas
             (vb .@ Snd) (instantiate1 (vb .@ Fst) t') bbs
         (Pi s t, aa :< aas, Pi s' t', bb :< bbs) ->
-          Equation
+          (Equation
             ctx
             (aa ^. _Unwrapped)
             (s ^. _Unwrapped)
             (bb ^. _Unwrapped)
-            (s' ^. _Unwrapped) :
+            (s' ^. _Unwrapped) :) <$>
           go
             (va .@ aa) (instantiate1 aa t) aas
             (vb .@ bb) (instantiate1 bb t') bbs
-        _ -> []
-decompose _ _ _ _ = []
+        _ ->
+          throwError $
+          Mismatch
+            (App (Var x) xs ^. _Unwrapped)
+            (App (Var y) ys ^. _Unwrapped)
+decompose _ _ _ _ = pure Nothing
 
-rigidRigid :: (Eq a, Ord b) => (a -> Maybe (Twinned b Tm a)) -> Equation b a -> [Equation b a]
+varsMatch :: (Eq b, Eq a) => Either (T b) a -> Either (T b) a -> Bool
+varsMatch (Left (L a)) (Left (L b)) = a == b
+varsMatch (Left (L a)) (Left (R b)) = a == b
+varsMatch (Left (R a)) (Left (L b)) = a == b
+varsMatch (Left (R a)) (Left (R b)) = a == b
+varsMatch (Right a) (Right b) = a == b
+varsMatch _ _ = False
+
+rigidRigid
+  :: (MonadError (UnifyError b a) m, Eq a, Ord b)
+  => (a -> m (Twinned b Tm a))
+  -> Equation b a
+  -> m [Equation b a]
 rigidRigid globals (Equation ctx ltm lty rtm rty) =
   case (ltm ^. _Wrapped, lty ^. _Wrapped, rtm ^. _Wrapped, rty ^. _Wrapped) of
     (Pi a b, Type, Pi a' b', Type) ->
+      pure
       [ Equation
           ctx
           (a ^. _Unwrapped)
@@ -163,6 +186,7 @@ rigidRigid globals (Equation ctx ltm lty rtm rty) =
           (Pi Type (lift Type) ^. _Unwrapped)
       ]
     (Sigma a b, Type, Sigma a' b', Type) ->
+      pure
       [ Equation
           ctx
           (a ^. _Unwrapped)
@@ -176,11 +200,28 @@ rigidRigid globals (Equation ctx ltm lty rtm rty) =
           (Lam b' ^. _Unwrapped)
           (Pi Type (lift Type) ^. _Unwrapped)
       ]
-    (App x xs, t, App y ys, t') ->
-      Equation
-        ctx
-        (t ^. _Unwrapped)
-        (Type ^. _Unwrapped)
-        (t' ^. _Unwrapped)
-        (Type ^. _Unwrapped) :
-      decompose globals ctx (x, xs) (y, ys)
+    (App x xs, t, App y ys, t') -> do
+      meqs <- decompose globals ctx (x, xs) (y, ys)
+      case meqs of
+        Nothing -> throwError $ Mismatch ltm rtm
+        Just eqs ->
+          pure $
+          Equation
+            ctx
+            (t ^. _Unwrapped)
+            (Type ^. _Unwrapped)
+            (t' ^. _Unwrapped)
+            (Type ^. _Unwrapped) :
+          eqs
+    (Var a, t, Var b, t') | varsMatch a b ->
+        pure
+        [ Equation
+            ctx
+            (t ^. _Unwrapped)
+            (Type ^. _Unwrapped)
+            (t' ^. _Unwrapped)
+            (Type ^. _Unwrapped)
+        ]
+    -- woo
+    (Type, Type, Type, Type) -> pure []
+    _ -> throwError $ Mismatch ltm rtm
