@@ -24,6 +24,7 @@ library
                      , containers
                      , ansi-wl-pprint
                      , mtl
+                     , transformers
   hs-source-dirs:      src
   ghc-options:         -Wall -Werror
   default-language:    Haskell2010

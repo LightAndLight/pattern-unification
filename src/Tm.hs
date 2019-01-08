@@ -8,7 +8,7 @@ import Bound.Scope (Scope, instantiate1, fromScope, toScope)
 import Bound.TH (makeBound)
 import Bound.Var (Var(..), unvar)
 import Data.Deriving (deriveEq1, deriveShow1)
-import Data.Sequence (Seq, ViewL(..))
+import Data.Sequence ((|>), Seq, ViewL(..))
 
 import qualified Data.Sequence as Seq
 
@@ -30,6 +30,15 @@ deriveShow1 ''Tm
 
 deriving instance Eq a => Eq (Tm a)
 deriving instance Show a => Show (Tm a)
+
+(.@) :: Tm a -> Tm a -> Tm a
+(.@) (App f xs) x = App f (xs |> x)
+(.@) (Lam s) x = instantiate1 x s
+(.@) (Pair a _) Fst = a
+(.@) (Pair _ b) Snd = b
+(.@) f x = App f $ Seq.singleton x
+
+infixl 5 .@
 
 type Ty = Tm
 
