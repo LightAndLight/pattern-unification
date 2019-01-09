@@ -303,7 +303,7 @@ flex globals (Equation ctx ltm lty rtm rty) =
     (App (Var (Meta x)) xs, App (Var (Meta y)) ys)
       | Just xs' <- distinctVars xs
       , Just ys' <- distinctVars ys
-      -> flexFlex x xs' lty y ys' rty
+      -> flexFlex x xs' y ys'
 
     (App (Var (Meta x)) xs, y)
       | Just xs' <- distinctVars xs
