@@ -3,25 +3,31 @@
 {-# language FlexibleContexts #-}
 {-# language FlexibleInstances, MultiParamTypeClasses #-}
 {-# language GeneralizedNewtypeDeriving #-}
+{-# language LambdaCase #-}
 {-# language OverloadedLists #-}
 {-# language ScopedTypeVariables #-}
 {-# language TemplateHaskell #-}
 {-# language TypeFamilies #-}
 module Unify where
 
-import Bound.Scope (instantiate1)
-import Control.Applicative (liftA2)
-import Control.Lens.Getter ((^.))
+import Bound.Scope (abstract1, instantiate1)
+import Control.Applicative (empty, liftA2)
+import Control.Lens.Getter ((^.), uses)
 import Control.Lens.Iso (iso)
 import Control.Lens.Wrapped (Wrapped(..), Rewrapped, _Wrapped, _Unwrapped)
+import Control.Lens.Setter ((%=))
+import Control.Lens.TH (makeLenses)
+import Control.Monad (guard)
 import Control.Monad.Except (MonadError, ExceptT(..), runExceptT, throwError)
-import Control.Monad.State (MonadState, StateT(..), gets)
+import Control.Monad.State (MonadState, StateT(..), evalStateT, gets, modify)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Data.Map (Map)
-import Data.Sequence (Seq, ViewL(..))
+import Data.Sequence (Seq, ViewL(..), ViewR(..))
+import Data.Set (Set)
 
 import qualified Data.Map as Map
 import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
 
 import Tm
 
@@ -48,6 +54,28 @@ instance (Eq a, Eq b, Eq c) => Eq (Head a b c) where
   TwinR a == TwinR b = a == b
   Normal a == Normal b = a == b
   _ == _ = False
+
+instance (Ord a, Ord b, Ord c) => Ord (Head a b c) where
+  compare (Meta a) (Meta b) = compare a b
+  compare (TwinL a) (TwinL b) = compare a b
+  compare (TwinL a) (TwinR b) = compare a b
+  compare (TwinR a) (TwinL b) = compare a b
+  compare (TwinR a) (TwinR b) = compare a b
+  compare (Normal a) (Normal b) = compare a b
+
+  compare Meta{} TwinL{} = LT
+  compare Meta{} TwinR{} = LT
+  compare Meta{} Normal{} = LT
+
+  compare TwinL{} Meta{} = GT
+  compare TwinL{} Normal{} = LT
+
+  compare TwinR{} Meta{} = GT
+  compare TwinR{} Normal{} = LT
+
+  compare Normal{} Meta{} = GT
+  compare Normal{} TwinL{} = GT
+  compare Normal{} TwinR{} = GT
 
 instance Applicative (Head a b) where
   pure = Normal
@@ -128,15 +156,26 @@ eta (Equation ctx ltm lty rtm rty) =
       ]
     _ -> []
 
+data UnifyState a b c
+  = UnifyState
+  { _usSolutions :: Map a (HeadT a b Tm c)
+  , _usMetas :: Map a (HeadT a b Ty c)
+  }
+makeLenses ''UnifyState
+
 newtype UnifyM a b c x
   = UnifyM
   { unUnifyM
     :: StateT
-         (Map a (HeadT a b Tm c))
+         (UnifyState a b c)
          (Either (UnifyError a b c))
          x
   }
-  deriving (Functor, Applicative, Monad, MonadState (Map a (HeadT a b Tm c)), MonadError (UnifyError a b c))
+  deriving
+    ( Functor, Applicative, Monad
+    , MonadState (UnifyState a b c)
+    , MonadError (UnifyError a b c)
+    )
 
 data UnifyError a b c
   = Mismatch (HeadT a b Tm c) (HeadT a b Tm c)
@@ -156,9 +195,9 @@ lookupTwin (Right b) mp =
     Just (Twin _ a) -> pure a
     Nothing -> throwError $ NotInScope (TwinR b)
 
-lookupMeta :: Ord a => a -> UnifyM a b c (HeadT a b Tm c)
-lookupMeta a = do
-  res <- gets $ Map.lookup a
+lookupMetaTy :: Ord a => a -> UnifyM a b c (HeadT a b Tm c)
+lookupMetaTy a = do
+  res <- uses usMetas $ Map.lookup a
   case res of
     Nothing -> throwError . NotInScope $ Meta a
     Just val -> pure val
@@ -172,8 +211,8 @@ decompose
   -> (Tm (Head a b c), Seq (Tm (Head a b c)))
   -> UnifyM a b c (Maybe [Equation a b c])
 decompose globals ctx (Var x, xs) (Var y, ys) = do
-  xTy <- foldHead lookupMeta (getTwin . Left) (getTwin . Right) globals x
-  yTy <- foldHead lookupMeta (getTwin . Left) (getTwin . Right) globals y
+  xTy <- foldHead lookupMetaTy (getTwin . Left) (getTwin . Right) globals x
+  yTy <- foldHead lookupMetaTy (getTwin . Left) (getTwin . Right) globals y
   Just <$> go (Var x) (unHeadT xTy) xs (Var y) (unHeadT yTy) ys
   where
     getTwin = flip lookupTwin ctx
@@ -224,14 +263,74 @@ decompose globals ctx (Var x, xs) (Var y, ys) = do
             (HeadT $ App (Var y) ys)
 decompose _ _ _ _ = pure Nothing
 
-flex :: Equation a b c -> UnifyM a b c (Maybe [Equation a b c])
-flex (Equation ctx ltm lty rtm rty) =
+distinctVars
+  :: (Ord a, Ord b, Ord c)
+  => Seq (Tm (Head a b c))
+  -> Maybe (Seq (Either (Either b b) c))
+distinctVars = flip evalStateT Set.empty . traverse f
+  where
+    f = \case
+      Var Meta{} -> empty
+      Var v -> do
+        seen <- gets $ Set.member v
+        guard $ not seen
+        modify $ Set.insert v
+        case v of
+          Meta{} -> empty
+          TwinL a -> pure $ Left (Left a)
+          TwinR a -> pure $ Left (Right a)
+          Normal a -> pure $ Right a
+      _ -> empty
+
+freeVars :: (Ord b, Ord c) => Tm (Head a b c) -> Set (Either (Either b b) c)
+freeVars =
+  foldr
+    (foldHead
+       (const id)
+       (Set.insert . Left . Left)
+       (Set.insert . Left . Left)
+       (Set.insert . Right))
+    Set.empty
+
+flex
+  :: forall a b c
+   . (Ord a, Ord b, Ord c)
+  => (c -> UnifyM a b c (HeadT a b Ty c))
+  -> Equation a b c
+  -> UnifyM a b c (Maybe [Equation a b c])
+flex globals (Equation ctx ltm lty rtm rty) =
   case (unHeadT ltm, unHeadT rtm) of
-    (App (Var x) xs, App (Var y) ys) -> flexFlex x xs lty y ys rty
-    (App (Var x) xs, y) -> flexRigid x xs lty y rty
+    (App (Var (Meta x)) xs, App (Var (Meta y)) ys)
+      | Just xs' <- distinctVars xs
+      , Just ys' <- distinctVars ys
+      -> flexFlex x xs' lty y ys' rty
+
+    (App (Var (Meta x)) xs, y)
+      | Just xs' <- distinctVars xs
+      , all (`Set.member` freeVars y) xs'
+      -> Just [] <$ flexRigid x xs' y (unHeadT rty)
+
     _ -> pure Nothing
   where
-    flexRigid = _
+    toHead = either (either TwinL TwinR) Normal
+
+    flexRigid
+      :: a -> Seq (Either (Either b b) c)
+
+      -> Tm (Head a b c) -> Ty (Head a b c)
+
+      -> UnifyM a b c ()
+    flexRigid meta xs y ty2 =
+      case Seq.viewr xs of
+        EmptyR -> usSolutions %= Map.insert meta (HeadT y)
+        xxs :> xx -> do
+          xxTy <- unHeadT <$> either (flip lookupTwin ctx) globals xx
+          let headxx = toHead xx
+          flexRigid
+            meta
+            xxs
+            (Lam $ abstract1 headxx y) (Pi xxTy $ abstract1 headxx ty2)
+
     flexFlex = _
 
 rigidRigid
