@@ -12,7 +12,7 @@ module Unify where
 
 import Bound.Scope (abstract1, instantiate1)
 import Control.Applicative (empty, liftA2)
-import Control.Lens.Getter ((^.), uses)
+import Control.Lens.Getter ((^.), uses, use)
 import Control.Lens.Iso (iso)
 import Control.Lens.Wrapped (Wrapped(..), Rewrapped, _Wrapped, _Unwrapped)
 import Control.Lens.Setter ((%=))
@@ -22,7 +22,7 @@ import Control.Monad.Except (MonadError, ExceptT(..), runExceptT, throwError)
 import Control.Monad.State (MonadState, StateT(..), evalStateT, gets, modify)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Data.Map (Map)
-import Data.Sequence (Seq, ViewL(..), ViewR(..))
+import Data.Sequence ((|>), Seq, ViewL(..), ViewR(..))
 import Data.Set (Set)
 
 import qualified Data.Map as Map
@@ -160,6 +160,7 @@ data UnifyState a b c
   = UnifyState
   { _usSolutions :: Map a (HeadT a b Tm c)
   , _usMetas :: Map a (HeadT a b Ty c)
+  , _usSupply :: a
   }
 makeLenses ''UnifyState
 
@@ -180,6 +181,12 @@ newtype UnifyM a b c x
 data UnifyError a b c
   = Mismatch (HeadT a b Tm c) (HeadT a b Tm c)
   | NotInScope (Head a b c)
+
+freshMeta :: Enum a => UnifyM a b c a
+freshMeta = do
+  a <- use usSupply
+  usSupply %= succ
+  pure a
 
 lookupTwin
   :: (MonadError (UnifyError a b c) m, Ord b)
@@ -294,7 +301,7 @@ freeVars =
 
 flex
   :: forall a b c
-   . (Ord a, Ord b, Ord c)
+   . (Ord a, Enum a, Ord b, Ord c)
   => (c -> UnifyM a b c (HeadT a b Ty c))
   -> Equation a b c
   -> UnifyM a b c (Maybe [Equation a b c])
@@ -303,7 +310,12 @@ flex globals (Equation ctx ltm lty rtm rty) =
     (App (Var (Meta x)) xs, App (Var (Meta y)) ys)
       | Just xs' <- distinctVars xs
       , Just ys' <- distinctVars ys
-      -> flexFlex x xs' y ys'
+      ->
+        if x == y
+        then do
+          newMeta <- freshMeta
+          flexFlexSame x xs' (unHeadT lty) ys' (unHeadT rty) newMeta mempty id
+        else _
 
     (App (Var (Meta x)) xs, y)
       | Just xs' <- distinctVars xs
@@ -331,7 +343,43 @@ flex globals (Equation ctx ltm lty rtm rty) =
             xxs
             (Lam $ abstract1 headxx y) (Pi xxTy $ abstract1 headxx ty2)
 
-    flexFlex = _
+    ltyFreeVars = freeVars $ unHeadT lty
+    rtyFreeVars = freeVars $ unHeadT rty
+
+    flexFlexSame
+      :: a
+      -> Seq (Either (Either b b) c) -> Ty (Head a b c)
+      -> Seq (Either (Either b b) c) -> Ty (Head a b c)
+      -> a -> Seq (Either (Either b b) c) -> (Tm (Head a b c) -> Tm (Head a b c))
+      -> UnifyM a b c (Maybe [Equation a b c])
+    flexFlexSame meta xs xty ys yty newMeta vs newTm =
+      case (Seq.viewr xs, Seq.viewr ys) of
+        (EmptyR, EmptyR) -> do
+          usMetas %= Map.insert newMeta (HeadT xty)
+          usSolutions %= Map.insert meta (HeadT $ foldr (\a -> Lam . abstract1 (toHead a)) (newTm $ Var $ Meta newMeta) vs)
+          pure $ Just [ Equation ctx (HeadT xty) (HeadT Type) (HeadT yty) (HeadT Type) ]
+        (xxs :> xx, yys :> yy) -> do
+          xxTy <- unHeadT <$> either (flip lookupTwin ctx) globals xx
+          yyTy <- unHeadT <$> either (flip lookupTwin ctx) globals yy
+          if xx == yy
+            then
+              if
+                xx `Set.member` rtyFreeVars &&
+                yy `Set.member` ltyFreeVars
+              then
+                flexFlexSame
+                  meta
+                  xxs (Pi xxTy $ abstract1 (toHead xx) xty)
+                  yys (Pi yyTy $ abstract1 (toHead yy) yty)
+                  newMeta (vs |> xx) (\tm -> tm .@ Var (toHead xx))
+              else pure Nothing
+            else
+              flexFlexSame
+                meta
+                xxs (Pi xxTy $ lift xty)
+                yys (Pi yyTy $ lift yty)
+                newMeta vs (\tm -> tm .@ Var (toHead xx))
+        _ -> throwError $ Mismatch ltm rtm
 
 rigidRigid
   :: (Ord a, Ord b, Eq c)
