@@ -10,17 +10,18 @@
 {-# language TypeFamilies #-}
 module Unify where
 
-import Bound.Scope (abstract1, instantiate1)
-import Control.Applicative (empty, liftA2)
-import Control.Lens.Getter ((^.), uses, use)
-import Control.Lens.Iso (iso)
-import Control.Lens.Wrapped (Wrapped(..), Rewrapped, _Wrapped, _Unwrapped)
+import Prelude hiding (pi)
+
+import Bound.Scope (Scope, instantiate1, fromScope)
+import Bound.Var (unvar)
+import Control.Applicative (empty)
+import Control.Lens.Getter (uses, use)
 import Control.Lens.Setter ((%=))
 import Control.Lens.TH (makeLenses)
 import Control.Monad (guard)
-import Control.Monad.Except (MonadError, ExceptT(..), runExceptT, throwError)
+import Control.Monad.Except (MonadError, throwError)
 import Control.Monad.State (MonadState, StateT(..), evalStateT, gets, modify)
-import Control.Monad.Trans.Class (MonadTrans, lift)
+import Control.Monad.Trans.Class (lift)
 import Data.Map (Map)
 import Data.Sequence ((|>), Seq, ViewL(..), ViewR(..))
 import Data.Set (Set)
@@ -30,91 +31,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 
 import Tm
-
-data Head a b c
-  = Meta a
-  | TwinL b
-  | TwinR b
-  | Normal c
-  deriving (Functor, Show)
-
-foldHead :: (a -> r) -> (b -> r) -> (b -> r) -> (c -> r) -> Head a b c -> r
-foldHead a bl br c h =
-  case h of
-    Meta x -> a x
-    TwinL x -> bl x
-    TwinR x -> br x
-    Normal x -> c x
-
-instance (Eq a, Eq b, Eq c) => Eq (Head a b c) where
-  Meta a == Meta b = a == b
-  TwinL a == TwinL b = a == b
-  TwinL a == TwinR b = a == b
-  TwinR a == TwinL b = a == b
-  TwinR a == TwinR b = a == b
-  Normal a == Normal b = a == b
-  _ == _ = False
-
-instance (Ord a, Ord b, Ord c) => Ord (Head a b c) where
-  compare (Meta a) (Meta b) = compare a b
-  compare (TwinL a) (TwinL b) = compare a b
-  compare (TwinL a) (TwinR b) = compare a b
-  compare (TwinR a) (TwinL b) = compare a b
-  compare (TwinR a) (TwinR b) = compare a b
-  compare (Normal a) (Normal b) = compare a b
-
-  compare Meta{} TwinL{} = LT
-  compare Meta{} TwinR{} = LT
-  compare Meta{} Normal{} = LT
-
-  compare TwinL{} Meta{} = GT
-  compare TwinL{} Normal{} = LT
-
-  compare TwinR{} Meta{} = GT
-  compare TwinR{} Normal{} = LT
-
-  compare Normal{} Meta{} = GT
-  compare Normal{} TwinL{} = GT
-  compare Normal{} TwinR{} = GT
-
-instance Applicative (Head a b) where
-  pure = Normal
-  Meta a <*> b = Meta a
-  TwinL a <*> b = TwinL a
-  TwinR a <*> b = TwinR a
-  Normal a <*> Meta b = Meta b
-  Normal a <*> TwinL b = TwinL b
-  Normal a <*> TwinR b = TwinR b
-  Normal a <*> Normal b = Normal (a b)
-
-instance Monad (Head a b) where
-  Meta a >>= f = Meta a
-  TwinL a >>= f = TwinL a
-  TwinR a >>= f = TwinR a
-  Normal a >>= f = f a
-
-newtype HeadT a b m c = HeadT { unHeadT :: m (Head a b c) }
-  deriving Functor
-
-instance Applicative m => Applicative (HeadT a b m) where
-  pure = HeadT . pure . pure
-  HeadT a <*> HeadT b = HeadT $ liftA2 (<*>) a b
-
-instance Monad m => Monad (HeadT a b m) where
-  HeadT a >>= f =
-    HeadT $ do
-      a' <- a
-      case a' of
-        Meta a -> pure $ Meta a
-        TwinL a -> pure $ TwinL a
-        TwinR a -> pure $ TwinR a
-        Normal a -> unHeadT $ f a
-
-lt :: Applicative f => b -> f (Head a b c)
-lt = pure . TwinL
-
-rt :: Applicative f => b -> f (Head a b c)
-rt = pure . TwinR
+import Head
 
 data Twin a b c = Twin (HeadT a b Ty c) (HeadT a b Ty c)
   deriving Functor
@@ -237,7 +154,7 @@ decompose globals ctx (Var x, xs) (Var y, ys) = do
     go va tas as vb tbs bs =
       case (tas, Seq.viewl as, tbs, Seq.viewl bs) of
         (_, EmptyL, _, EmptyL) ->
-          pure $
+          pure
           [ Equation
               ctx
               (HeadT va)
@@ -315,8 +232,10 @@ flex globals (Equation ctx ltm lty rtm rty) =
         then do
           newMeta <- freshMeta
           flexFlexSame x xs' (unHeadT lty) ys' (unHeadT rty) newMeta mempty id
-        else _
-
+        else
+          -- flexFlex with different metas. to be written.
+          -- it's not in gundry's thesis.. why?
+          pure Nothing
     (App (Var (Meta x)) xs, y)
       | Just xs' <- distinctVars xs
       , all (`Set.member` freeVars y) xs'
@@ -341,7 +260,7 @@ flex globals (Equation ctx ltm lty rtm rty) =
           flexRigid
             meta
             xxs
-            (Lam $ abstract1 headxx y) (Pi xxTy $ abstract1 headxx ty2)
+            (lam headxx y) (pi (headxx, xxTy) ty2)
 
     ltyFreeVars = freeVars $ unHeadT lty
     rtyFreeVars = freeVars $ unHeadT rty
@@ -355,30 +274,37 @@ flex globals (Equation ctx ltm lty rtm rty) =
     flexFlexSame meta xs xty ys yty newMeta vs newTm =
       case (Seq.viewr xs, Seq.viewr ys) of
         (EmptyR, EmptyR) -> do
-          usMetas %= Map.insert newMeta (HeadT xty)
-          usSolutions %= Map.insert meta (HeadT $ foldr (\a -> Lam . abstract1 (toHead a)) (newTm $ Var $ Meta newMeta) vs)
+          usMetas %=
+            Map.insert newMeta (HeadT xty)
+          usSolutions %=
+            Map.insert meta (HeadT $ foldr (lam . toHead) (newTm . Var $ Meta newMeta) vs)
           pure $ Just [ Equation ctx (HeadT xty) (HeadT Type) (HeadT yty) (HeadT Type) ]
         (xxs :> xx, yys :> yy) -> do
           xxTy <- unHeadT <$> either (flip lookupTwin ctx) globals xx
           yyTy <- unHeadT <$> either (flip lookupTwin ctx) globals yy
           if xx == yy
             then
+              -- these variables will be included and we don't care whether or not
+              -- the target type depends on them
+              flexFlexSame
+                meta
+                xxs (pi (toHead xx, xxTy) xty)
+                yys (pi (toHead yy, yyTy) yty)
+                newMeta (vs |> xx) (\tm -> tm .@ Var (toHead xx))
+            else
               if
-                xx `Set.member` rtyFreeVars &&
-                yy `Set.member` ltyFreeVars
+                -- since we're going to ignore these variables, we need to check
+                -- that the target type doesn't depend on them
+                xx `Set.notMember` ltyFreeVars &&
+                yy `Set.notMember` rtyFreeVars
               then
                 flexFlexSame
                   meta
-                  xxs (Pi xxTy $ abstract1 (toHead xx) xty)
-                  yys (Pi yyTy $ abstract1 (toHead yy) yty)
-                  newMeta (vs |> xx) (\tm -> tm .@ Var (toHead xx))
-              else pure Nothing
-            else
-              flexFlexSame
-                meta
-                xxs (Pi xxTy $ lift xty)
-                yys (Pi yyTy $ lift yty)
-                newMeta vs (\tm -> tm .@ Var (toHead xx))
+                  xxs (Pi xxTy $ lift xty)
+                  yys (Pi yyTy $ lift yty)
+                  newMeta vs (\tm -> tm .@ Var (toHead xx))
+              else
+                pure Nothing
         _ -> throwError $ Mismatch ltm rtm
 
 rigidRigid
@@ -443,3 +369,50 @@ rigidRigid globals (Equation ctx ltm lty rtm rty) =
     -- woo
     (Type, Type, Type, Type) -> pure []
     _ -> throwError $ Mismatch ltm rtm
+
+rigidVars
+  :: forall a b c
+   . (Ord a, Ord b, Ord c)
+  => Tm (Head a b c)
+  -> Set (Head a b c)
+rigidVars = go False Just
+  where
+    goScope
+      :: forall x w
+       . Bool
+      -> (x -> Maybe (Head a b c))
+      -> Scope w Tm x
+      -> Set (Head a b c)
+    goScope underMeta toVar s =
+      go underMeta (unvar (const Nothing) toVar) (fromScope s)
+
+    go :: forall x. Bool -> (x -> Maybe (Head a b c)) -> Tm x -> Set (Head a b c)
+    go underMeta toVar tm =
+      case tm of
+        Var a ->
+          if underMeta
+          then Set.empty
+          else maybe Set.empty Set.singleton $ toVar a
+        Type -> Set.empty
+        App x xs ->
+          go underMeta toVar x <>
+          case x of
+            Var a ->
+              foldMap
+                (go (maybe underMeta (\case; Meta{} -> True; _ -> underMeta) $ toVar a) toVar)
+                xs
+            _ ->
+              foldMap (go underMeta toVar) xs
+        Fst -> Set.empty
+        Snd -> Set.empty
+        Pi s t ->
+          go underMeta toVar s <>
+          goScope underMeta toVar t
+        Lam s ->
+          goScope underMeta toVar s
+        Sigma s t ->
+          go underMeta toVar s <>
+          goScope underMeta toVar t
+        Pair a b ->
+          go underMeta toVar a <>
+          go underMeta toVar b

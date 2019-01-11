@@ -4,7 +4,7 @@
 {-# language StandaloneDeriving #-}
 module Tm where
 
-import Bound.Scope (Scope, instantiate1, fromScope, toScope)
+import Bound.Scope (Scope, abstract1, instantiate1, fromScope, toScope)
 import Bound.TH (makeBound)
 import Bound.Var (Var(..), unvar)
 import Data.Deriving (deriveEq1, deriveShow1)
@@ -37,6 +37,12 @@ deriving instance Show a => Show (Tm a)
 (.@) (Pair a _) Fst = a
 (.@) (Pair _ b) Snd = b
 (.@) f x = App f $ Seq.singleton x
+
+lam :: Eq a => a -> Tm a -> Tm a
+lam a b = Lam $ abstract1 a b
+
+pi :: Eq a => (a, Ty a) -> Ty a -> Ty a
+pi (a, t) s = Pi t $ abstract1 a s
 
 infixl 5 .@
 
