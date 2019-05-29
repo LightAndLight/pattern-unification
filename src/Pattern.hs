@@ -59,17 +59,12 @@ abstractTele ::
   [(a, f a)] ->
   f a ->
   Tele a f a
-abstractTele = go id
+abstractTele [] a = Done a
+abstractTele ((x, y) : as) a = Tele x y (go x $ abstractTele as a)
   where
-    go ::
-      (Monad g, Eq a) =>
-      (f a -> g a) ->
-      [(a, f a)] ->
-      f a ->
-      Tele a g a
-    go f [] b = Done (f b)
-    go f ((x, y) : as) b =
-      Tele x (f y) $ go (abstract1 x . f) as b
+    go :: (Monad f, Eq a) => a -> Tele a f a -> Tele a (Scope () f) a
+    go a (Done b) = Done (abstract1 a b)
+    go a (Tele b c d) = Tele b (abstract1 a c) (go a d)
 
 data Tm a
   = Var a
@@ -147,21 +142,6 @@ data TypeError
   | TypeMismatch (Tm Text) (Tm Text)
   deriving (Eq, Show)
 
-checkTele ::
-  Eq a =>
-  (a -> Text) ->
-  (a -> Maybe (Ty a)) ->
-  Tele Text Tm a ->
-  Ty a ->
-  Either TypeError ()
-checkTele names ctx (Done tm) ty = check names ctx tm ty
-checkTele names ctx (Tele n tm rest) ty =
-  checkTele
-    (unvar (const n) names)
-    (unvar (const $ Just $ F <$> tm) (fmap (F <$>) . ctx))
-    (fromTele rest)
-    (F <$> ty)
-
 check ::
   Eq a =>
   (a -> Text) ->
@@ -180,16 +160,18 @@ check names ctx tm ty =
       case ty of
         Type -> do
           () <- check names ctx s Type
-          checkTele
+          check
             (unvar (const n) names)
-            (unvar (const $ Just $ F <$> s) (fmap (F <$>) . ctx))
-            (fromTele t)
+            (fmap (F <$>) . unvar (const $ Just s) ctx)
+            (case fromTele t of
+               Done tt -> tt
+               Tele n tt rest -> Pi n tt rest)
             Type
         _ -> Left $ PiIsTypeNot (names <$> ty)
 
-    Lam n e ->
+    Lam _ e ->
       case ty of
-        Pi _ s t ->
+        Pi n s t ->
           check
             (unvar (const n) names)
             (unvar (const $ Just $ F <$> s) (fmap (F <$>) . ctx))
