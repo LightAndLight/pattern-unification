@@ -1,18 +1,26 @@
 {-# language DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
+{-# language KindSignatures #-}
+{-# language LambdaCase #-}
 {-# language RankNTypes #-}
 {-# language TemplateHaskell #-}
+{-# language QuantifiedConstraints #-}
 module Pattern where
 
 import Bound.Class (Bound(..))
-import Bound.Scope (Scope, fromScope, abstract1, instantiate1, hoistScope)
+import Bound.Scope (Scope, fromScope, toScope, abstract1, instantiate1, hoistScope)
 import Bound.TH (makeBound)
 import Bound.Var (Var(..), unvar)
 import Control.Monad (ap)
 import Control.Monad.Trans.Class (lift)
+import Data.Coerce (Coercible, coerce)
 import Data.Deriving (deriveEq1, deriveShow1, makeLiftEq)
 import Data.Functor.Classes (Eq1(..), eq1, showsPrec1)
+import Data.Functor.Product (Product)
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Set (Set)
 import Data.Text (Text)
+
+import qualified Data.Set as Set
 
 data Tele n f a
   = Done (f a)
@@ -241,3 +249,86 @@ infer names ctx tm =
 
     Ann a t -> t <$ check names ctx a t
     _ -> Left $ Can'tInfer (names <$> tm)
+
+data Equation f a =
+  Equation
+  { _eqTmL :: f a
+  , _eqTyL :: f a
+  , _eqTmR :: f a
+  , _eqTyR :: f a
+  }
+  deriving (Eq, Show)
+
+instance Bound Equation where
+  Equation a b c d >>>= f = Equation (a >>= f) (b >>= f) (c >>= f) (d >>= f)
+
+data Problem f a
+  = ForallS (f a) (Problem f (Var () a))
+  | ForallT (f a) (f a) (Problem f (Var Bool a))
+  | Unify (Equation f a)
+
+instance Bound Problem where
+  ForallS a b >>>= f = ForallS (a >>= f) (b >>>= traverse f)
+  ForallT a b c >>>= f = ForallT (a >>= f) (a >>= f) (c >>>= traverse f)
+  Unify a >>>= f = Unify (a >>>= f)
+
+data M a = M Int | N a
+  deriving (Eq, Ord, Functor, Foldable, Traversable)
+instance Applicative M where
+  pure = N
+  M a <*> _ = M a
+  _ <*> M a = M a
+  N f <*> N a = N (f a)
+instance Monad M where
+  M n >>= _ = M n
+  N a >>= f = f a
+
+newtype MT m a = MT { unMT :: m (M a) }
+  deriving (Functor, Foldable, Traversable)
+instance Applicative m => Applicative (MT m) where
+  pure = MT . pure . pure
+  MT f <*> MT a = MT $ (<*>) <$> f <*> a
+instance Monad m => Monad (MT m) where
+  MT a >>= f = MT $ do
+    a' <- a
+    case a' of
+      M n -> pure $ M n
+      N x | MT res <- f x -> res
+
+fmv :: Tm (M a) -> Set Int
+fmv = foldr (\case; M n -> Set.insert n; _ -> id) mempty
+
+fv :: Ord a => Tm (M a) -> Set a
+fv = foldl (foldr Set.insert) mempty
+
+fv_rig :: Ord a => Tm (M a) -> Set (M a)
+fv_rig = go False
+  where
+    go :: Ord a => Bool -> Tm (M a) -> Set (M a)
+    go underMeta tm =
+      case f of
+        Var a -> (if underMeta then id else Set.insert a) $ foldMap (go True) xs
+        Ann a b -> go False a <> go False b
+        Type -> mempty
+        Pi _ s t ->
+          go False s <>
+          filterVars
+            (go False $
+             case sequence <$> fromTele t of
+               Done tt -> tt
+               Tele n ss tt -> Pi n ss tt)
+        Lam _ e ->
+          filterVars $
+          go False (sequence <$> fromScope e)
+        Sigma _ s t -> go False s <> filterVars (go False (sequence <$> fromScope t))
+        Pair a b -> go False a <> go False b
+        Fst a -> go False a
+        Snd a -> go False a
+      where
+        (f, xs) = unfoldApps tm
+
+    filterVars :: Ord a => Set (M (Var () a)) -> Set (M a)
+    filterVars =
+      foldr
+        (\case; M n -> Set.insert (M n); N (B ()) -> id; N (F a) -> Set.insert (N a))
+        mempty
