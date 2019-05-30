@@ -228,6 +228,18 @@ pi_ = go []
         Pi tele b' -> Pi (consTele n t $ abstractTele1 n tele) b'
         b' -> Pi (Tele n t mempty) b'
 
+piV_ ::
+  [(Text, TyV Text)] ->
+  TyV Text ->
+  TyV Text
+piV_ = go []
+  where
+    go names [] b = abstractD (`elemIndex` names) 0 b
+    go names ((n, t) : as) b =
+      case go (Right n : names) as b of
+        Pi tele b' -> Pi (consTele n t $ abstractTele1 (Right n) tele) b'
+        b' -> Pi (Tele n t mempty) b'
+
 lam_ :: Text -> Tm Text -> Tm Text
 lam_ n = Lam n . abstract1 n
 
@@ -381,48 +393,33 @@ data Problem a
 fmv :: TmV a -> Set Int
 fmv = foldr (either (\case; M a -> Set.insert a; _ -> id) (const id)) mempty
 
-fv :: Ord a => TmV a -> Set (Either Int a)
-fv =
-  foldr
-    (either
-       (\case
-           TL a -> Set.insert (Left a)
-           TR a -> Set.insert (Left a)
-           S a -> Set.insert (Left a)
-           _ -> id)
-       (Set.insert . Right))
-    mempty
+fv :: Ord a => TmV a -> Set (Either V a)
+fv = foldr Set.insert mempty
 
-{-
-fv_rig :: Ord a => Tm (M a) -> Set (M a)
+fv_rig :: Ord a => TmV a -> Set (Either V a)
 fv_rig = go False
   where
-    go :: Ord a => Bool -> Tm (M a) -> Set (M a)
+    goTele (Tele _ a as) = go False a <> foldMap (go False . snd) as
     go underMeta tm =
-      case f of
-        Var a -> (if underMeta then id else Set.insert a) $ foldMap (go True) xs
+      case tm of
+        Var (Left M{}) -> mempty
+        Var a ->
+          if underMeta
+          then mempty
+          else Set.singleton a
+        Bound{} -> mempty
         Ann a b -> go False a <> go False b
         Type -> mempty
-        Pi _ s t ->
-          go False s <>
-          filterVars
-            (go False $
-             case sequence <$> fromTele t of
-               Done tt -> tt
-               Tele n ss tt -> Pi n ss tt)
-        Lam _ e ->
-          filterVars $
-          go False (sequence <$> fromScope e)
-        Sigma _ s t -> go False s <> filterVars (go False (sequence <$> fromScope t))
+        Pi a b -> goTele a <> go False b
+        Lam _ a -> go False a
+        App{} ->
+          let
+            (f, xs) = unfoldApps tm
+          in
+            case f of
+              Var (Left M{}) -> foldMap (go True) xs
+              Var a -> Set.singleton a <> foldMap (go False) xs
+        Sigma _ a b -> go False a <> go False b
         Pair a b -> go False a <> go False b
         Fst a -> go False a
         Snd a -> go False a
-      where
-        (f, xs) = unfoldApps tm
-
-    filterVars :: Ord a => Set (M (Var () a)) -> Set (M a)
-    filterVars =
-      foldr
-        (\case; M n -> Set.insert (M n); N (B ()) -> id; N (F a) -> Set.insert (N a))
-        mempty
--}
