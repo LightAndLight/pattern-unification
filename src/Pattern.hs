@@ -1,117 +1,214 @@
-{-# language DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
-{-# language KindSignatures #-}
+{-# language BangPatterns #-}
+{-# language DeriveFunctor, DeriveFoldable #-}
 {-# language LambdaCase #-}
 {-# language RankNTypes #-}
-{-# language TemplateHaskell #-}
 {-# language QuantifiedConstraints #-}
 module Pattern where
 
-import Bound.Class (Bound(..))
-import Bound.Scope (Scope, fromScope, toScope, abstract1, instantiate1, hoistScope)
-import Bound.TH (makeBound)
-import Bound.Var (Var(..), unvar)
+import Debug.Trace
+
 import Control.Monad (ap)
 import Control.Monad.Trans.Class (lift)
 import Data.Coerce (Coercible, coerce)
 import Data.Deriving (deriveEq1, deriveShow1, makeLiftEq)
 import Data.Functor.Classes (Eq1(..), eq1, showsPrec1)
 import Data.Functor.Product (Product)
+import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Map (Map)
 import Data.Set (Set)
+import Data.Sequence (Seq, (<|))
 import Data.Text (Text)
+import Data.Vector (Vector)
 
+import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import qualified Data.Vector as Vector
 
-data Tele n f a
-  = Done (f a)
-  | Tele n (f a) (Tele n (Scope () f) a)
-  deriving (Eq, Show, Functor, Foldable, Traversable)
+data Tele a =
+  Tele
+    -- 0 free vars
+    Text (Tm a)
+    -- `i`th element has i+1 free variables
+    (Vector (Text, Tm a))
+  deriving (Eq, Show, Functor, Foldable)
 
-$(pure [])
-instance (Eq n, Eq1 f, Monad f) => Eq1 (Tele n f) where
-  liftEq = $(makeLiftEq ''Tele)
+teleSize :: Tele a -> Int
+teleSize (Tele _ _ v) = Vector.length v + 1
 
-deriveShow1 ''Tele
+consTele :: Text -> Tm a -> Tele a -> Tele a
+consTele a b (Tele x y z) = Tele a b $ Vector.cons (x, y) z
 
-instance Bound (Tele n) where
-  Done a >>>= f = Done (a >>= f)
-  Tele n s t >>>= f = Tele n (s >>= f) (t >>>= lift . f)
-
-fromTele ::
-  Monad f =>
-  Tele n (Scope () f) a ->
-  Tele n f (Var () a)
-fromTele (Done a) = Done $ fromScope a
-fromTele (Tele n a b) = Tele n (fromScope a) (fromTele b)
-
-instTele ::
-  Monad f =>
-  f a ->
-  Tele n (Scope () f) a ->
-  Tele n f a
-instTele = go id
-  where
-    go ::
-      Monad f =>
-      (forall a. f a -> g a) ->
-      f a ->
-      Tele n (Scope () f) a ->
-      Tele n g a
-    go f x (Done a) =
-      Done $ f $ instantiate1 x a
-    go f x (Tele n a b) =
-      Tele n (f $ instantiate1 x a) (go (hoistScope f) (lift x) b)
-
-abstractTele ::
-  (Monad f, Eq a) =>
-  [(a, f a)] ->
-  f a ->
-  Tele a f a
-abstractTele [] a = Done a
-abstractTele ((x, y) : as) a = Tele x y (go x $ abstractTele as a)
-  where
-    go :: (Monad f, Eq a) => a -> Tele a f a -> Tele a (Scope () f) a
-    go a (Done b) = Done (abstract1 a b)
-    go a (Tele b c d) = Tele b (abstract1 a c) (go a d)
+data V
+  = M Int
+  | S Int
+  | TL Int
+  | TR Int
+  deriving (Eq, Ord, Show)
 
 data Tm a
   = Var a
+
+  | Bound Int
   | Ann (Tm a) (Tm a)
 
   | Type
 
-  | Pi Text (Tm a) (Tele Text (Scope () Tm) a)
-  | Lam Text (Scope () Tm a)
+  --   t    (teleSize t) free vars
+  | Pi (Tele a) (Tm a)
+  --         1 free var
+  | Lam Text (Tm a)
   | App (Tm a) (Tm a)
 
-  | Sigma Text (Tm a) (Scope () Tm a)
+  --                  1 free var
+  | Sigma Text (Tm a) (Tm a)
   | Pair (Tm a) (Tm a)
   | Fst (Tm a)
   | Snd (Tm a)
-  deriving (Functor, Foldable, Traversable)
-deriveEq1 ''Tm
-deriveShow1 ''Tm
-instance Eq a => Eq (Tm a) where; (==) = eq1
-instance Show a => Show (Tm a) where; showsPrec = showsPrec1
+  deriving (Eq, Show, Functor, Foldable)
 
-instance Applicative Tm where; pure = return; (<*>) = ap
-instance Monad Tm where
-  return = Var
-  tm >>= f =
-    case tm of
-      Var a -> f a
-      Ann a b -> Ann (a >>= f) (b >>= f)
+type Ty = Tm
 
-      Type -> Type
+rho ::
+  -- i
+  Int ->
+  -- Fin m -> Fin m
+  (Int -> Int) ->
+  -- Fin (i + m) -> Fin (i + n)
+  Int -> Int
+rho i f n
+  | n < i = n
+  | n >= i = f (n-i) + i
 
-      Pi n a b -> Pi n (a >>= f) (b >>>= lift . f)
-      Lam n a -> Lam n (a >>>= f)
-      App a b -> App (a >>= f) (b >>= f)
+renameTele ::
+  -- Fin m -> Fin n
+  (Int -> Int) ->
+  -- Tele m
+  Tele a ->
+  -- Tele n
+  Tele a
+renameTele f (Tele n s ts) =
+  Tele n
+    (rename f s)
+    (Vector.imap (\i (nn, tt) -> (nn, rename (rho (i+1) f) tt)) ts)
 
-      Sigma n a b -> Sigma n (a >>= f) (b >>>= f)
-      Pair a b -> Pair (a >>= f) (a >>= f)
-      Fst a -> Fst (a >>= f)
-      Snd a -> Snd (a >>= f)
+--        (Fin m -> Fin n) -> Tm m -> Tm n
+rename :: (Int -> Int) -> Tm a -> Tm a
+rename f tm =
+  case tm of
+    Var a -> Var a
+    Bound a -> Bound (f a)
+    Ann a b -> Ann (rename f a) (rename f b)
+    Type -> Type
+    Pi tele a -> Pi (renameTele f tele) (rename (rho (teleSize tele) f) a)
+    Lam n a -> Lam n $ rename (rho 1 f) a
+    App a b -> App (rename f a) (rename f b)
+    Sigma n s t -> Sigma n (rename f s) (rename (rho 1 f) t)
+    Pair a b -> Pair (rename f a) (rename f b)
+    Fst a -> Fst $ rename f a
+    Snd a -> Snd $ rename f a
+
+sig ::
+  -- i
+  Int ->
+  -- Fin m -> Tm n
+  (Int -> Tm a) ->
+  -- Fin (i + m) -> Tm (i + n)
+  Int -> Tm a
+sig i f n
+  | n < i = Bound n
+  | n >= i = rename (+i) $ f (n-i)
+
+substTele ::
+  -- Fin m -> Fin n
+  (Int -> Tm a) ->
+  -- Tele m
+  Tele a ->
+  -- Tele n
+  Tele a
+substTele f (Tele n s ts) =
+  Tele n
+    (subst f s)
+    (Vector.imap (\i (nn, tt) -> (nn, subst (sig (i+1) f) tt)) ts)
+
+--       (Fin m -> Tm n) -> Tm m -> Tm n
+subst :: (Int -> Tm a) -> Tm a -> Tm a
+subst f tm =
+  case tm of
+    Var a -> Var a
+    Bound a -> f a
+    Ann a b -> Ann (subst f a) (subst f b)
+    Type -> Type
+    Pi tele a -> Pi (substTele f tele) $ subst (sig (teleSize tele) f) a
+    Lam n a -> Lam n $ subst (sig 1 f) a
+    App a b -> App (subst f a) (subst f b)
+    Sigma n s t -> Sigma n (subst f s) $ subst (sig 1 f) t
+    Pair a b -> Pair (subst f a) (subst f b)
+    Fst a -> Fst $ subst f a
+    Snd a -> Snd $ subst f a
+
+inst ::
+  -- Tm (suc n)
+  Tm a ->
+  -- Tm n
+  Tm a ->
+  -- Tm n
+  Tm a
+inst a b = subst (\case; 0 -> b; n -> Bound (n-1)) a
+
+abstractD :: Eq a => (a -> Maybe Int) -> Int -> Tm a -> Tm a
+abstractD f = go
+  where
+    go !depth tm =
+      case tm of
+        Var a -> maybe (Var a) (Bound . (depth+)) (f a)
+        Bound a -> Bound $! if a >= depth then a+1 else a
+        Ann a b -> Ann (go depth a) (go depth b)
+        Type -> Type
+        Pi tele a ->
+          Pi
+            (abstractDTele f depth tele)
+            (go (depth+teleSize tele) a)
+        Lam n a -> Lam n (go (depth+1) a)
+        App a b -> App (go depth a) (go depth b)
+        Sigma n s t ->
+          Sigma n (go depth s) (go (depth+1) t)
+        Pair a b -> Pair (go depth a) (go depth b)
+        Fst a -> Fst $ go depth a
+        Snd a -> Snd $ go depth a
+
+abstractDTele :: Eq a => (a -> Maybe Int) -> Int -> Tele a -> Tele a
+abstractDTele f !depth (Tele n s ts) =
+  Tele n
+    (abstractD f depth s)
+    (Vector.imap (\i (nn, tt) -> (nn, abstractD f (depth+i+1) tt)) ts)
+
+abstract :: Eq a => (a -> Maybe Int) -> Tm a -> Tm a
+abstract f = abstractD f 0
+
+abstract1 ::
+  Eq a =>
+  a ->
+  -- Tm n
+  Tm a ->
+  -- Tm (suc n)
+  Tm a
+abstract1 a =
+  abstract (\x -> if a == x then Just 0 else Nothing)
+
+abstractTele :: Eq a => (a -> Maybe Int) -> Tele a -> Tele a
+abstractTele f = abstractDTele f 0
+
+abstractTele1 ::
+  Eq a =>
+  a ->
+  -- Tm n
+  Tele a ->
+  -- Tm (suc n)
+  Tele a
+abstractTele1 a =
+  abstractTele (\x -> if a == x then Just 0 else Nothing )
 
 unfoldApps :: Tm a -> (Tm a, [Tm a])
 unfoldApps = go []
@@ -120,187 +217,183 @@ unfoldApps = go []
     go bs a = (a, bs)
 
 pi_ ::
-  (Text, Ty Text) ->
   [(Text, Ty Text)] ->
   Ty Text ->
   Ty Text
-pi_ a as b =
-  case abstractTele (a : as) b of
-    Done{} -> undefined
-    Tele n s t -> Pi n s t
+pi_ = go []
+  where
+    go names [] b = abstractD (`elemIndex` names) 0 b
+    go names ((n, t) : as) b =
+      case go (n : names) as b of
+        Pi tele b' -> Pi (consTele n t $ abstractTele1 n tele) b'
+        b' -> Pi (Tele n t mempty) b'
 
 lam_ :: Text -> Tm Text -> Tm Text
-lam_ n a = Lam n (abstract1 n a)
+lam_ n = Lam n . abstract1 n
 
 sigma_ :: (Text, Ty Text) -> Ty Text -> Ty Text
-sigma_ (n, s) t = Sigma n s (abstract1 n t)
+sigma_ (n, s) = Sigma n s . abstract1 n
 
-type Ty = Tm
-
-data TypeError
-  = NotInScope Text
-  | ExpectedPi (Tm Text)
-  | ExpectedSigma (Tm Text)
-  | TypeIsTypeNot (Tm Text)
-  | PiIsTypeNot (Tm Text)
-  | LamIsPiNot (Tm Text)
-  | SigmaIsTypeNot (Tm Text)
-  | PairIsSigmaNot (Tm Text)
-  | Can'tInfer (Tm Text)
-  | TypeMismatch (Tm Text) (Tm Text)
+data TypeError a
+  = NotInScope a
+  | Unbound Int
+  | ExpectedPi (Tm a)
+  | ExpectedSigma (Tm a)
+  | TypeIsTypeNot (Tm a)
+  | PiIsTypeNot (Tm a)
+  | LamIsPiNot (Tm a)
+  | SigmaIsTypeNot (Tm a)
+  | PairIsSigmaNot (Tm a)
+  | Can'tInfer (Tm a)
+  | TypeMismatch (Tm a) (Tm a)
   deriving (Eq, Show)
 
 check ::
-  Eq a =>
-  (a -> Text) ->
-  (a -> Maybe (Ty a)) ->
+  Ord a =>
+  Map a (Ty a) ->
+  Seq Text ->
+  Seq (Ty a) ->
   Tm a ->
   Ty a ->
-  Either TypeError ()
-check names ctx tm ty =
+  Either (TypeError a) ()
+check nameCtx names ctx tm ty =
   case tm of
     Type ->
       case ty of
         Type -> pure ()
-        _ -> Left $ TypeIsTypeNot (names <$> ty)
+        _ -> Left $ TypeIsTypeNot ty
 
-    Pi n s t ->
+    Pi (Tele n s rest) t ->
       case ty of
         Type -> do
-          () <- check names ctx s Type
-          check
-            (unvar (const n) names)
-            (fmap (F <$>) . unvar (const $ Just s) ctx)
-            (case fromTele t of
-               Done tt -> tt
-               Tele n tt rest -> Pi n tt rest)
-            Type
-        _ -> Left $ PiIsTypeNot (names <$> ty)
+          () <- check nameCtx names ctx s Type
+          case Vector.length rest of
+            0 ->
+              check nameCtx (n <| names) (s <| ctx) t Type
+            _ ->
+              check
+                nameCtx
+                (n <| names)
+                (s <| ctx)
+                (Pi (uncurry Tele (Vector.head rest) (Vector.tail rest)) t)
+                Type
+        _ -> Left $ PiIsTypeNot ty
 
     Lam _ e ->
       case ty of
-        Pi n s t ->
-          check
-            (unvar (const n) names)
-            (unvar (const $ Just $ F <$> s) (fmap (F <$>) . ctx))
-            (fromScope e)
-            (case fromTele t of
-               Done tt -> tt
-               Tele n tt rest -> Pi n tt rest)
-        _ -> Left $ LamIsPiNot (names <$> ty)
+        Pi (Tele n s rest) t ->
+          check nameCtx (n <| names) (rename (+1) <$> s <| ctx) e $
+          case Vector.length rest of
+            0 -> t
+            _ -> Pi (uncurry Tele (Vector.head rest) (Vector.tail rest)) t
+        _ -> Left $ LamIsPiNot ty
 
     Sigma n s t ->
       case ty of
         Type -> do
-          () <- check names ctx s Type
-          check
-            (unvar (const n) names)
-            (unvar (const $ Just $ F <$> s) (fmap (F <$>) . ctx))
-            (fromScope t)
-            Type
-        _ -> Left $ SigmaIsTypeNot (names <$> ty)
+          () <- check nameCtx names ctx s Type
+          check nameCtx (n <| names) (s <| ctx) t Type
+        _ -> Left $ SigmaIsTypeNot ty
 
     Pair a b ->
       case ty of
         Sigma _ s t -> do
-          () <- check names ctx a s
-          check names ctx b (instantiate1 a t)
-        _ -> Left $ PairIsSigmaNot (names <$> ty)
+          () <- check nameCtx names ctx a s
+          check nameCtx names ctx b (inst t a)
+        _ -> Left $ PairIsSigmaNot ty
 
     _ -> do
-      ty' <- infer names ctx tm
+      ty' <- infer nameCtx names ctx tm
       if ty == ty'
         then pure ()
-        else Left $ TypeMismatch (names <$> ty) (names <$> ty')
+        else Left $ TypeMismatch ty ty'
 
 infer ::
-  Eq a =>
-  (a -> Text) ->
-  (a -> Maybe (Ty a)) ->
+  Ord a =>
+  Map a (Ty a) ->
+  Seq Text ->
+  Seq (Ty a) ->
   Tm a ->
-  Either TypeError (Tm a)
-infer names ctx tm =
+  Either (TypeError a) (Tm a)
+infer nameCtx names ctx tm =
   case tm of
-    Var a ->
-      case ctx a of
-        Nothing -> Left $ NotInScope (names a)
+    Var n ->
+      case Map.lookup n nameCtx of
+        Nothing -> Left $ NotInScope n
         Just ty -> pure ty
 
+    Bound a ->
+      case ctx Seq.!? a of
+        Nothing -> Left $ Unbound a
+        Just ty -> traceShow ((() <$) <$> ctx, () <$ ty) $ pure ty
+
     App f x -> do
-      fTy <- infer names ctx f
+      fTy <- infer nameCtx names ctx f
       case fTy of
-        Pi _ s t -> do
-          () <- check names ctx x s
-          case instTele x t of
-            Done tt -> pure tt
-            Tele n tt rest -> pure $ Pi n tt rest
-        _ -> Left $ ExpectedPi (names <$> fTy)
+        Pi (Tele _ s rest) t -> do
+          () <- check nameCtx names ctx x s
+          pure $
+            inst
+            (case Vector.length rest of
+               0 -> t
+               _ -> Pi (uncurry Tele (Vector.head rest) (Vector.tail rest)) t)
+            x
+        _ -> Left $ ExpectedPi fTy
 
     Fst a -> do
-      aTy <- infer names ctx a
+      aTy <- infer nameCtx names ctx a
       case aTy of
         Sigma _ x _ -> pure x
-        _ -> Left $ ExpectedSigma (names <$> aTy)
+        _ -> Left $ ExpectedSigma aTy
+
     Snd a -> do
-      aTy <- infer names ctx a
+      aTy <- infer nameCtx names ctx a
       case aTy of
-        Sigma _ _ y -> pure $ instantiate1 (Fst a) y
-        _ -> Left $ ExpectedSigma (names <$> aTy)
+        Sigma _ _ y -> pure $ inst y (Fst a)
+        _ -> Left $ ExpectedSigma aTy
 
-    Ann a t -> t <$ check names ctx a t
-    _ -> Left $ Can'tInfer (names <$> tm)
+    Ann a t -> t <$ check nameCtx names ctx a t
+    _ -> Left $ Can'tInfer tm
 
-data Equation f a =
+data Equation a =
   Equation
-  { _eqTmL :: f a
-  , _eqTyL :: f a
-  , _eqTmR :: f a
-  , _eqTyR :: f a
+  { _eqTmL :: Tm (Either V a)
+  , _eqTyL :: Ty (Either V a)
+  , _eqTmR :: Tm (Either V a)
+  , _eqTyR :: Ty (Either V a)
   }
   deriving (Eq, Show)
 
-instance Bound Equation where
-  Equation a b c d >>>= f = Equation (a >>= f) (b >>= f) (c >>= f) (d >>= f)
+type TmV a = Tm (Either V a)
+type TyV a = TmV a
 
-data Problem f a
-  = ForallS (f a) (Problem f (Var () a))
-  | ForallT (f a) (f a) (Problem f (Var Bool a))
-  | Unify (Equation f a)
+data Entry a
+  = Twin (TyV a) (TyV a)
+  | Single (TyV a)
+  deriving (Eq, Show)
 
-instance Bound Problem where
-  ForallS a b >>>= f = ForallS (a >>= f) (b >>>= traverse f)
-  ForallT a b c >>>= f = ForallT (a >>= f) (a >>= f) (c >>>= traverse f)
-  Unify a >>>= f = Unify (a >>>= f)
+data Problem a
+  = Problem
+  { _pScope :: Seq (Entry a)
+  , _pEquation :: Equation a
+  } deriving (Eq, Show)
 
-data M a = M Int | N a
-  deriving (Eq, Ord, Functor, Foldable, Traversable)
-instance Applicative M where
-  pure = N
-  M a <*> _ = M a
-  _ <*> M a = M a
-  N f <*> N a = N (f a)
-instance Monad M where
-  M n >>= _ = M n
-  N a >>= f = f a
+fmv :: TmV a -> Set Int
+fmv = foldr (either (\case; M a -> Set.insert a; _ -> id) (const id)) mempty
 
-newtype MT m a = MT { unMT :: m (M a) }
-  deriving (Functor, Foldable, Traversable)
-instance Applicative m => Applicative (MT m) where
-  pure = MT . pure . pure
-  MT f <*> MT a = MT $ (<*>) <$> f <*> a
-instance Monad m => Monad (MT m) where
-  MT a >>= f = MT $ do
-    a' <- a
-    case a' of
-      M n -> pure $ M n
-      N x | MT res <- f x -> res
+fv :: Ord a => TmV a -> Set (Either Int a)
+fv =
+  foldr
+    (either
+       (\case
+           TL a -> Set.insert (Left a)
+           TR a -> Set.insert (Left a)
+           S a -> Set.insert (Left a)
+           _ -> id)
+       (Set.insert . Right))
+    mempty
 
-fmv :: Tm (M a) -> Set Int
-fmv = foldr (\case; M n -> Set.insert n; _ -> id) mempty
-
-fv :: Ord a => Tm (M a) -> Set a
-fv = foldl (foldr Set.insert) mempty
-
+{-
 fv_rig :: Ord a => Tm (M a) -> Set (M a)
 fv_rig = go False
   where
@@ -332,3 +425,4 @@ fv_rig = go False
       foldr
         (\case; M n -> Set.insert (M n); N (B ()) -> id; N (F a) -> Set.insert (N a))
         mempty
+-}
