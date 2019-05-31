@@ -19,8 +19,10 @@ extra-source-files:  CHANGELOG.md
 library
   exposed-modules:     Pattern
   build-depends:       base ^>=4.12.0.0
+                     , concurrent-supply
                      , containers
                      , deriving-compat
+                     , mtl
                      , text
                      , transformers >= 0.5
                      , vector

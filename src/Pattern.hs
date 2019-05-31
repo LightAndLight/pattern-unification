@@ -1,14 +1,19 @@
 {-# language BangPatterns #-}
 {-# language DeriveFunctor, DeriveFoldable #-}
+{-# language GeneralizedNewtypeDeriving #-}
 {-# language LambdaCase #-}
+{-# language OverloadedStrings #-}
 {-# language RankNTypes #-}
 {-# language QuantifiedConstraints #-}
 module Pattern where
 
 import Debug.Trace
 
+import Control.Concurrent.Supply (Supply, freshId)
 import Control.Monad (ap)
+import Control.Monad.State (MonadState, State, gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Data.Bifunctor (first)
 import Data.Coerce (Coercible, coerce)
 import Data.Deriving (deriveEq1, deriveShow1, makeLiftEq)
 import Data.Functor.Classes (Eq1(..), eq1, showsPrec1)
@@ -157,6 +162,11 @@ inst ::
   Tm a
 inst a b = subst (\case; 0 -> b; n -> Bound (n-1)) a
 
+(.@) :: Tm a -> Tm a -> Tm a
+(.@) (Lam _ a) b = inst a b
+(.@) a b = App a b
+infixl 5 .@
+
 abstractD :: Eq a => (a -> Maybe Int) -> Int -> Tm a -> Tm a
 abstractD f = go
   where
@@ -228,6 +238,9 @@ pi_ = go []
         Pi tele b' -> Pi (consTele n t $ abstractTele1 n tele) b'
         b' -> Pi (Tele n t mempty) b'
 
+(.->) :: Tm a -> Tm a -> Tm a
+(.->) a b = Pi (Tele "_" a mempty) (rename (+1) b)
+
 piV_ ::
   [(Text, TyV Text)] ->
   TyV Text ->
@@ -259,6 +272,14 @@ data TypeError a
   | Can'tInfer (Tm a)
   | TypeMismatch (Tm a) (Tm a)
   deriving (Eq, Show)
+
+smallerPi :: Vector (Text, Tm a) -> Tm a -> Tm a
+smallerPi ss = Pi (uncurry Tele (Vector.head ss) (Vector.tail ss))
+
+popTele :: Tele a -> Either (Text, Tm a) (Text, Tm a, Tele a)
+popTele (Tele n s ss)
+  | Vector.null ss = Left (n, s)
+  | otherwise = Right (n, s, uncurry Tele (Vector.head ss) (Vector.tail ss))
 
 check ::
   Ord a =>
@@ -352,29 +373,21 @@ infer nameCtx names ctx tm =
             x
         _ -> Left $ ExpectedPi fTy
 
+    Ann a t -> t <$ check nameCtx names ctx a t
+
     Fst a -> do
       aTy <- infer nameCtx names ctx a
       case aTy of
-        Sigma _ x _ -> pure x
+        Sigma _ s t -> pure s
         _ -> Left $ ExpectedSigma aTy
 
     Snd a -> do
       aTy <- infer nameCtx names ctx a
       case aTy of
-        Sigma _ _ y -> pure $ inst y (Fst a)
+        Sigma _ s t -> pure $ inst t (Fst a)
         _ -> Left $ ExpectedSigma aTy
 
-    Ann a t -> t <$ check nameCtx names ctx a t
     _ -> Left $ Can'tInfer tm
-
-data Equation a =
-  Equation
-  { _eqTmL :: Tm (Either V a)
-  , _eqTyL :: Ty (Either V a)
-  , _eqTmR :: Tm (Either V a)
-  , _eqTyR :: Ty (Either V a)
-  }
-  deriving (Eq, Show)
 
 type TmV a = Tm (Either V a)
 type TyV a = TmV a
@@ -387,7 +400,10 @@ data Entry a
 data Problem a
   = Problem
   { _pScope :: Seq (Entry a)
-  , _pEquation :: Equation a
+  , _pTmL :: Tm (Either V a)
+  , _pTyL :: Ty (Either V a)
+  , _pTmR :: Tm (Either V a)
+  , _pTyR :: Ty (Either V a)
   } deriving (Eq, Show)
 
 fmv :: TmV a -> Set Int
@@ -423,3 +439,91 @@ fv_rig = go False
         Pair a b -> go False a <> go False b
         Fst a -> go False a
         Snd a -> go False a
+
+data Env a
+  = Env
+  { _envProblems :: Seq (Problem a)
+  , _envSupply :: Supply
+  }
+
+newtype Unify x a
+  = Unify
+  { unUnify :: State (Env x) a
+  } deriving (Functor, Applicative, Monad, MonadState (Env x))
+
+fresh :: Unify x Int
+fresh = do
+  (n, s) <- gets $ freshId . _envSupply
+  n <$ modify (\e -> e { _envSupply = s })
+
+renameV :: (Int -> Int) -> TmV a -> TmV a
+renameV f =
+  fmap (first $ \case; TL a -> TL (f a); TR a -> TR (f a); S a -> S (f a); m -> m)
+
+etaExpand :: Problem a -> Maybe [Problem a]
+etaExpand (Problem ctx l lty r rty) =
+  case (lty, rty) of
+    (Pi (Tele n s ss) t, Pi (Tele n' s' ss') t') ->
+      let
+        vl = Var $ Left (TL 0)
+        vr = Var $ Left (TR 0)
+      in
+        Just
+        [ Problem
+            (Twin (renameV (+1) s) (renameV (+1) s') <| ctx)
+            (renameV (+1) l .@ vl)
+            (if Vector.null ss
+             then renameV (+1) t .@ vl
+             else inst (renameV (rho 1 (+1)) $ smallerPi ss t) vl)
+            (renameV (+1) r .@ vr)
+            (if Vector.null ss'
+             then renameV (+1) t' .@ vr
+             else inst (renameV (rho 1 (+1)) $ smallerPi ss' t') vr)
+        ]
+    (Sigma n s t, Sigma n' s' t') ->
+      Just
+      [ Problem ctx (Fst l) s (Fst r) s'
+      , Problem ctx (Snd l) (inst t $ Fst l) (Snd r) (inst t' $ Fst r)
+      ]
+    _ -> Nothing
+
+decompose :: Problem a -> Maybe [Problem a]
+decompose (Problem ctx l lty r rty) =
+  case (l, lty, r, rty) of
+    (Type, Type, Type, Type) -> Just []
+    (Pi tele t, Type, Pi tele' t', Type) ->
+      Just $
+      case (popTele tele, popTele tele') of
+        (Left (_, s), Left (_, s')) ->
+          [ Problem ctx s Type s' Type
+          , Problem ctx t (s .-> Type) t' (s' .-> Type)
+          ]
+        (Left (_, s), Right (_, s', tele2')) ->
+          let t1' = Pi tele2' t' in
+          [ Problem ctx s Type s' Type
+          , Problem ctx t (s .-> Type) t1' (s' .-> Type)
+          ]
+        (Right (n, s, tele2), Left (n', s')) ->
+          let t1 = Pi tele2 t in
+          [ Problem ctx s Type s' Type
+          , Problem ctx t1 (s .-> Type) t' (s' .-> Type)
+          ]
+        (Right (n, s, tele2), Right (n', s', tele2')) ->
+          let
+            t1 = Pi tele2 t
+            t1' = Pi tele2' t'
+          in
+            [ Problem ctx s Type s' Type
+            , Problem ctx t1 (s .-> Type) t1' (s' .-> Type)
+            ]
+    (_, Sigma _ s t, _, Sigma _ s' t') -> _
+    _
+      | (f, xs) <- unfoldApps l
+      , (f', xs') <- unfoldApps r
+      , length xs == length xs' ->
+          case (f, f') of
+            (Var (Left (TL a)), Var (Left (TR a'))) ->
+              Just $ zipWith (\x y -> Problem ctx x _ y _) xs xs'
+            (Var (Left (S a)), Var (Left (S a'))) ->
+              Just $ zipWith (\x y -> Problem ctx x _ y _) xs xs'
+      | otherwise -> Nothing
